@@ -11,16 +11,26 @@ time_t convtime(long long *tp){
     return (unsigned int) t;
 }
 
-int main(int argc,char* argv[]){
+inline long long gettime(long long *tp){
+    return *tp;
+}
 
-FILE* f=fopen(argv[1],"rb");
+int main(int argc,char* argv[]){
+int javitanikell=0;
+
+FILE* f=fopen(argv[1],"r+b");
+if(!f){
+    printf("cannot open: %s\n",argv[1]);
+    return 2;
+}
+
 //fseek(f,0,0);
 unsigned char hdr[512];
 fread(hdr,512,1,f);//fseek(f,0x1E,0);
 
 //00000000 7B 5C 72 74 ? 66 31 5C 61 ? 6E 73 69 5C ? 61 6E 73 69  {\rtf1\ansi\ansi  
 if(hdr[0]==0x7B && hdr[1]==0x5C && hdr[2]==0x72) return 1; // RTF!!!
-if(hdr[0]!=0xd0 || hdr[7]!=0xe1) return 1;  // TESTING ONLY
+if(hdr[0]!=0xd0 || hdr[7]!=0xe1) javitanikell=1; //return 1;  // TESTING ONLY
 
 fseek(f,0,2);
 int fs=ftell(f);
@@ -86,6 +96,44 @@ memset(secttype,0,fatsize+128);
 #define SECT_OLD 64
 #define SECT_MARKEDFREE 128
 
+unsigned char ujhdr[512]={0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, //signature
+			  0,0,0,0,  0,0,0,0, 0,0,0,0,  0,0,0,0,           //CLSID=0
+			  0x3E,0, 0x03,0, 0xFE,0xFF,    // version, byteorder
+			  9,0,  6,0,      // sector sizes
+			  0,0,0,0,0,0,   // reserved
+			  0,0,0,0,	 // csectDir
+			  2,0,0,0,       // p[0] FAT length!!!
+			  0xA3,0,0,0,    // p[1] RootDir start!!!
+			  0,0,0,0,       // p[2] signature = 0
+			  0,0x10,0,0,    // p[3] ulMiniSectorCutoff=4096
+			  0x94,0,0,0,    // p[4] MiniFat Start!!!
+			  1,0,0,0,       // p[5] csectMiniFat number of SECTs in the MiniFAT chain
+			  0xFE,0xFF,0xFF,0xFF, // first SECT in the DIFAT chain
+			  0,0,0,0,       // number of SECTs in the DIFAT chain
+			  0xFF,0xFF,0xFF,0xFF,  // FAT table
+			  };
+int* fatlist=ujhdr+0x4C;
+int* ujhdrp=ujhdr+0x2C; // params! 
+memset(fatlist,0xff,4*109); // del fat table
+int fatlistlen=0;
+int minifat=-2;
+
+if(argc>2) minifat=atoi(argv[2]);
+if(argc>3){
+    // FAT lista megadva parancssorban!
+    // secttype felulirasa!!!
+    char* p=argv[3];
+    while(p && *p){
+	char* q=strchr(p,',');
+	if(q){ *q=0; q++; }
+	fatlist[fatlistlen]=atoi(p);
+	printf("defined FAT@%d = %d\n",fatlistlen,fatlist[fatlistlen]);
+	++fatlistlen;
+	p=q;
+    }
+    javitanikell=1;
+//    for(i=2;i<argc;i++) fatlist[fatlistlen++]=atoi(argv[i]);
+}
 
 
 int i=0;
@@ -104,7 +152,39 @@ while(1){
 	printf("  start sector: %d   size: %d\n",fat[0x74/4],fat[0x78/4]);
     }
     if(memcmp(docsumm,fat,16)==0) printf("DocumentSymmary @ %d\n",i);
+    
     int j;
+
+  if(fatlistlen>0){
+	// van fat-listank!!!!!!! hasznaljuk.
+	for(j=0;j<fatlistlen;j++)
+	    if(i==fatlist[j]){
+		// megvan!
+		printf("FAT Entry @ %d\n",i);
+		fatpos[i]=j;
+		secttype[i]|=SECT_FAT;
+		j*=128;
+		{	printf("  fat sectors included: ");
+			int k;
+			for(k=0;k<128;k++){
+			    if(fat[k]==0xFFFFFFFD) printf("%d,",j+k);
+			    if(fat[k]==0xFFFFFFFC) secttype[j+k]|=SECT_MARKEDDIFAT;
+			    if(fat[k]==0xFFFFFFFD) secttype[j+k]|=SECT_MARKEDFAT;
+			    if(fat[k]==0xFFFFFFFF) secttype[j+k]|=SECT_MARKEDFREE;
+			    if(fat[k]==0xFFFFFFFE) secttype[j+k]|=SECT_MARKEDDATA|SECT_MARKEDEND;
+			    if(fat[k]<=fatsize){
+				secttype[j+k]|=SECT_MARKEDDATA;
+//				printf("  data @ %d\n",j+k);
+			    }
+			}
+			printf("\n");
+//			break;
+		}
+		break;
+	    }
+  } else {
+    // no fat list -> try to detect!
+    
     int ff=0;
     for(j=0;j<128;j++){
 	if(fat[j]<0xFFFFFFFD)
@@ -224,8 +304,9 @@ while(1){
 //	else printf("maybe FAT @ %d (%d) %d\n",i,j,fat[j]);
 
     }
-    
-    ++i;
+
+  }    
+  ++i;
 }
 
 printf("=====================================================================\n");
@@ -239,31 +320,11 @@ printf("=====================================================================\n"
 //00000040 01 00 00 00 ? FE FF FF FF ? 00 00 00 00 ? A5 00 00 00  ....þÿÿÿ....¥...  
 //00000050 A4 00 00 00 ? FF FF FF FF ? FF FF FF FF ? FF FF FF FF  ¤...ÿÿÿÿÿÿÿÿÿÿÿÿ  
 
-unsigned char ujhdr[512]={0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1, //signature
-			  0,0,0,0,  0,0,0,0, 0,0,0,0,  0,0,0,0,           //CLSID=0
-			  0x3E,0, 0x03,0, 0xFE,0xFF,    // version, byteorder
-			  9,0,  6,0,      // sector sizes
-			  0,0,0,0,0,0,   // reserved
-			  0,0,0,0,	 // csectDir
-			  2,0,0,0,       // p[0] FAT length!!!
-			  0xA3,0,0,0,    // p[1] RootDir start!!!
-			  0,0,0,0,       // p[2] signature = 0
-			  0,0x10,0,0,    // p[3] ulMiniSectorCutoff=4096
-			  0x94,0,0,0,    // p[4] MiniFat Start!!!
-			  1,0,0,0,       // p[5] csectMiniFat number of SECTs in the MiniFAT chain
-			  0xFE,0xFF,0xFF,0xFF, // first SECT in the DIFAT chain
-			  0,0,0,0,       // number of SECTs in the DIFAT chain
-			  0xFF,0xFF,0xFF,0xFF,  // FAT table
-			  };
-int* fatlist=ujhdr+0x4C;
-int* ujhdrp=ujhdr+0x2C; // params! 
-memset(fatlist,0xff,4*109); // del fat table
+
 
 int rootdir=-2;
 int rootdirstart=-2;
-time_t rootdirtime=0;
-int fatlistlen=0;
-int minifat=-2;
+long long rootdirtime=0;
 int minifatsize=0;
 
 int prob_sokfat=0;
@@ -279,10 +340,11 @@ for(i=0;i<fatsize;i++){
 		if(fread(fat,512,1,f)<=0) break;
 //		time_t t1=convtime(&fat[0x64/4]);
 		time_t t2=convtime(&fat[0x64/4+2]);
+		long long tl=gettime(&fat[0x64/4+2]);
 		printf("RootDir sector:%4d  modify:%s",i,ctime(&t2));
 		printf("  start sector:%4d  size: %d\n",fat[0x74/4],fat[0x78/4]);
-		if(rootdir<0 || t2>=rootdirtime){
-		    rootdir=i; rootdirtime=t2;
+		if(rootdir<0 || tl>=rootdirtime){
+		    rootdir=i; rootdirtime=tl;
 		    rootdirstart=fat[0x74/4];
 		}
 	    }
@@ -322,7 +384,10 @@ for(i=0;i<fatsize;i++){
 	    if(old) secttype[i]|=SECT_OLD;
 	    for(k=0;k<128;k++){
 	        if(fat[k]==0xFFFFFFFD)
-	    	    printf("%d,",128*fatpos[i]+k);
+	    	    printf("%d,",128*fatpos[i]+k); else
+	    	if((secttype[128*fatpos[i]+k]&(SECT_FAT|SECT_MARKEDFAT|SECT_MARKEDDATA)) == (SECT_FAT|SECT_MARKEDDATA)){
+	    	    printf("(%d),",128*fatpos[i]+k);
+	    	}
 	    	if((fat[k]>=0 && fat[k]<fatsize) || fat[k]==0xFFFFFFFE){
 	    	    if(rootdir==128*fatpos[i]+k)  printf("Root,");
 	    	    if(rootdirstart==128*fatpos[i]+k) printf("Stream,");
@@ -340,8 +405,26 @@ for(i=0;i<fatsize;i++){
     }
 }
 
-// find minifat
-for(i=0;i<fatsize;i++){
+if(minifat>=0){
+    // minifat given
+    printf("MiniFAT sector defined: %d\n",minifat);
+    int i=minifat;
+    while(i>=0 && i<fatsize && minifatsize<32){
+	    // verify in FAT
+	    int j=fatlist[i/128];
+	    if(j>=0 && j<fatsize){
+		fseek(f,512*(j+1),0);
+		if(fread(fat,512,1,f)<=0) break;
+		if(fat[i&127]==0xFFFFFFFE || fat[i&127]<fatsize){
+		    printf("MiniFAT @ %d   sector: %d  (next: %d)\n",minifatsize,i,fat[i&127]);
+		    i=fat[i&127];++minifatsize;continue;
+		}
+	    }
+	    break;
+    }
+} else
+  for(i=0;i<fatsize;i++){
+    // find minifat
     unsigned char t=secttype[i];
     if(t&15){
 	if( (t&(SECT_FAT|SECT_MARKEDFAT|SECT_MARKEDDATA)) == (SECT_FAT|SECT_MARKEDDATA) ){
@@ -351,9 +434,9 @@ for(i=0;i<fatsize;i++){
 		fseek(f,512*(j+1),0);
 		if(fread(fat,512,1,f)<=0) break;
 		if(fat[i&127]==0xFFFFFFFE || fat[i&127]<fatsize){
-		    printf("MiniFAT @ %d   sector: %d\n",fatpos[i],i);
+		    printf("MiniFAT @ %d   sector: %d  (next: %d)\n",fatpos[i],i,fat[i&127]);
 		    if(fatpos[i]==0 && minifat>=0) ++prob_sokmini;
-		    if(fatpos[i]<=0 && minifat<0){
+		    if((fatpos[i]<=0 && minifat<0)||(fatpos[i]==0)){
 			minifat=i;
 			minifatsize = (fat[i&127]==0xFFFFFFFE) ? 1 : 2;
 		    } else
@@ -446,15 +529,22 @@ if(hdr[0]==0xd0 && hdr[7]==0xe1){
 	        data[0],  data[1], data[4],data[5],data[4]-data[1], data[6],data[7]);
     for(i=0;i<data[0];i++) printf("%d,",data[8+i]);
     printf(" [%d] %s\n",fs,argv[1]);
-}
-
-if(memcmp(ujhdr,hdr,512)){
+  if(memcmp(ujhdr,hdr,512)){
     printf("HDR mismatch!!!  file:%s\n",argv[1]);
     for(i=0;i<512;i++)
 	if(hdr[i]!=ujhdr[i])
 	    printf("at 0x%02X:  old=0x%02X  new=0x%02X\n",i,hdr[i],ujhdr[i]);
-} else
+  } else
     printf("HDR OKAY!!!!!    file:%s\n",argv[1]);
+}
+
+if(javitanikell){
+    // recover file!!!
+    printf("HDR rewrite!!!   file:%s\n",argv[1]);
+    fseek(f,0,0);
+    fwrite(ujhdr,512,1,f);
+    fclose(f);
+}
 
 
 }
