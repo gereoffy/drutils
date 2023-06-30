@@ -8,17 +8,13 @@ lstree.py   - ntfs MFT file parser and fixer
 
 
 testfiles.py - file content validator/verifier, supports:
-
   - old msoffice documents (doc/xls/ppt and other OLE2 files)
   - new office documents   (docx/xlsx/pptx and other ZIP-based xml files)
   - common image formats   (jpg, png, psd)
   - pdf
 
 
-testjpeg.py - jpeg parser & validator, used by testfiles
-
-testpdf.py  - pdf  parser & validator, used by testfiles
-
-lzw.py      - pdf LZW decompress, used by testpdf.py
-
-lznt1.py    - ntfs decompress, used by lstree.py
+testjpeg.py - jpeg parser & validator, used by testfiles  
+testpdf.py  - pdf  parser & validator, used by testfiles  
+lzw.py      - pdf LZW decompress, used by testpdf.py (not my code)  
+lznt1.py    - ntfs decompress, used by lstree.py (not my code)  
