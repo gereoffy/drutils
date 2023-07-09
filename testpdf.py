@@ -59,7 +59,7 @@ class LZWDecode:
                 pW = cW
                 cW = self.next_code()
                 if cW == -1:
-                    raise PdfReadError("Missed the stop code in LZWDecode!")
+                    raise BufferError("End of buffer reached without LZW stop code")
                 if cW == self.STOP:
                     break
                 elif cW == self.CLEARDICT:
@@ -82,7 +82,9 @@ class LZWDecode:
                         and self.bitspercode < 12
                     ):
                         self.bitspercode += 1
-            print("LZW bytesleft=%d  decoded %d -> %d bytes, %d runs"%(len(self.data)-self.bytepos, len(self.data),len(b''.join(baos)),len(baos)))
+            bleft=len(self.data)-self.bytepos
+            print("LZW bytesleft=%d  decoded %d -> %d bytes, %d runs"%(bleft, len(self.data),len(b''.join(baos)),len(baos)))
+            if bleft>3: raise BufferError("%d bytes left in LZW buffer"%(bleft))
             return b''.join(baos)
 
 
@@ -91,8 +93,10 @@ def ASCIIHexDecode(d):
     pend=len(d)
     data=bytearray()
     while p<pend:
-        if d[p]<=32: continue
         if d[p]==0x3D: break # EOF
+        if d[p]<=32:  # skip whitespace
+            p+=1
+            continue
         x=hexdigit(d[p])
         p+=1
         if x!=None:
@@ -103,6 +107,7 @@ def ASCIIHexDecode(d):
             else:
                 y=0
             data.append((x<<4)+y)
+#        else: break # invalid char
     return data
 
 # special string object
@@ -404,7 +409,7 @@ def parse_pdf(d,debug=False):
             if d[q:q+5]==b'%%EOF':
                 if pend>q+7:
                     print('XREF: %d bytes left after EOF'%(pend-(q+5)))
-                    if pend>q+512: errcnt+=1
+                    if pend>=q+4096: errcnt+=1
                 pend=q+5 # update pend... (shit after EOF, should not be parsed)
             else:
                 print('XREF: missing EOF!')
@@ -475,25 +480,19 @@ def parse_pdf(d,debug=False):
                 if debug: print("CRYPT: "+str(objs[3:]))
                 print("CRYPT: V="+str(objs_value(objs,b'/V'))+" len="+str(objs_value(objs,b'/Length'))+" cfm="+str(objs_value(objs,b'/CFM')) )
 
-            if stream and objs_value(objs,b'/Type')==[b'/EmbeddedFile']:
-                try:
+
+            try:
+              if stream and not encrypt:
+                dd=stream.decode()
+
+                if objs_value(objs,b'/Type')==[b'/EmbeddedFile']:
                     dd=stream.decode()
                     ll=objs_value(objs,b'/Length')
                     print("FILESTREAM.size=%d/%s"%(len(dd),str(ll)))
                     if debug: open("PDF.filestream.raw","wb").write(dd)
                     content.append((dd,streamname)) # fixme filename
-                except:
-                    print("FILESTREAM-Exception!!! %s" % (traceback.format_exc()))
-                    errcnt+=10
 
-# b'/BitsPerComponent'
-            try:
-#                s=objs_value(objs,b'stream')
-#                if s and not b'/BitsPerComponent' in objs and not b'/Image' in objs and not b'/XML' in objs and not b'/XRef' in objs:
-#                if s and not b'/BitsPerComponent' in objs and not b'/Image' in objs and not b'/XRef' in objs: # a kepeket es a binaris xref-et kihagyjuk...
-                if stream and not encrypt:
-                  dd=stream.decode()
-                  if b'/ObjStm' in objs: # ebben lehet /URI elrejtve...
+                if b'/ObjStm' in objs: # ebben lehet /URI elrejtve...
 #                    print("OBJSTREAM(%d): %s"%(len(dd),bytes(dd[0:32])))
 #                    for m in [b'http://',b'HTTP://',b'https://',b'HTTPS://',b'/URI']:
 #                        mp=dd.find(m)
@@ -506,12 +505,14 @@ def parse_pdf(d,debug=False):
                     except:
                         offs=0
                     pp,oo,ss=parse_pdf_obj(dd,offs,len(dd))
-                    if debug: print("OBJSTREAM->"+str(oo))
+                    if debug:
+                        print("OBJSTREAM<-",dd)
+                        print("OBJSTREAM->",oo)
                     objs=oo # innentol ezt vizsgaljuk! az eredeti obj-ben ugyis csak Length, Filter, stream szokott lenni...
                     stream=None
             except:
-                print("STREAM-Exception!!! %s" % (traceback.format_exc()))
-                errcnt+=1
+              print("STREAM-Exception!!! %s" % (traceback.format_exc()))
+              errcnt+=1
 
 #            if oid==uriobjid and type(objs[3])==PDFString:
             if len(objs)>3 and type(objs[3])==PDFString:
@@ -600,7 +601,9 @@ if __name__ == '__main__':
     try:
       with open(fn,"rb") as f:
         print("=================== %s ====================="%(fn))
-        ret=parse_pdf(f.read(),True)
+        cont,ret=parse_pdf(f.read(),True)
+        print("ERRORS=%d"%(ret))
+        if ret: os.rename(fn,"hibas/"+fn.split("/")[-1])
 #        ret=parse_pdf(f.read())
 #        if ret: print(ret)
 #        if ret: print("=================== %s ====================="%(fn))
