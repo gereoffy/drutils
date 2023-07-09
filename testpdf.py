@@ -7,7 +7,6 @@ import sys
 import traceback
 import zlib
 
-import lzw
 import base64
 
 def hexdigit(a):
@@ -15,6 +14,77 @@ def hexdigit(a):
     if a>=0x41 and a<=0x46: return a+10-0x41
     if a>=0x61 and a<=0x66: return a+10-0x61
     return None
+
+# based on https://github.com/py-pdf/pypdf/blob/main/pypdf/filters.py
+class LZWDecode:
+        def __init__(self, data: bytes) -> None:
+            self.STOP = 257
+            self.CLEARDICT = 256
+            self.data = data
+            self.bytepos = 0
+            self.bitpos = 0
+            self.dict = [b''] * 4096
+            for i in range(256):
+                self.dict[i] = bytes([i])
+            self.reset_dict()
+
+        def reset_dict(self) -> None:
+            self.dictlen = 258
+            self.bitspercode = 9
+
+        def next_code(self) -> int:
+            fillbits = self.bitspercode
+            value = 0
+            while fillbits > 0:
+                if self.bytepos >= len(self.data):
+                    return -1
+                nextbits = self.data[self.bytepos]
+                bitsfromhere = 8 - self.bitpos
+                bitsfromhere = min(bitsfromhere, fillbits)
+                value |= (
+                    (nextbits >> (8 - self.bitpos - bitsfromhere))
+                    & (0xFF >> (8 - bitsfromhere))
+                ) << (fillbits - bitsfromhere)
+                fillbits -= bitsfromhere
+                self.bitpos += bitsfromhere
+                if self.bitpos >= 8:
+                    self.bitpos = 0
+                    self.bytepos = self.bytepos + 1
+            return value
+
+        def decode(self) -> bytes:
+            cW = self.CLEARDICT
+            baos = []
+            while True:
+                pW = cW
+                cW = self.next_code()
+                if cW == -1:
+                    raise PdfReadError("Missed the stop code in LZWDecode!")
+                if cW == self.STOP:
+                    break
+                elif cW == self.CLEARDICT:
+                    self.reset_dict()
+                elif pW == self.CLEARDICT:
+                    baos.append(self.dict[cW])
+                else:
+                    if cW < self.dictlen:
+                        baos.append(self.dict[cW])
+                        p = self.dict[pW] + self.dict[cW][:1]
+                        self.dict[self.dictlen] = p
+                        self.dictlen += 1
+                    else:
+                        p = self.dict[pW] + self.dict[pW][:1]
+                        baos.append(p)
+                        self.dict[self.dictlen] = p
+                        self.dictlen += 1
+                    if (
+                        self.dictlen >= (1 << self.bitspercode) - 1
+                        and self.bitspercode < 12
+                    ):
+                        self.bitspercode += 1
+#            print("LZW decoded %d -> %d bytes, %d runs"%(len(self.data),len(b''.join(baos)),len(baos)))
+            return b''.join(baos)
+
 
 def ASCIIHexDecode(d):
     p=0
@@ -64,7 +134,7 @@ class PDFStream():
                 if f in [b'/ASCII85Decode',b'/A85']: d=base64.a85decode(d.split(b'~>')[0])  #ValueError: Ascii85 encoded byte sequences must end with b'~>'
                 elif f==b'/ASCIIHexDecode': d=ASCIIHexDecode(d)
                 elif f==b'/FlateDecode': d=inflate(d)  # d=zlib.decompress(d)
-                elif f==b'/LZWDecode':   d=b''.join(lzw.decompress(d))
+                elif f==b'/LZWDecode': d=LZWDecode(d).decode()
                 elif f not in [b'/CCITTFaxDecode',b'/JBIG2Decode',b'/JPXDecode',b'/DCTDecode']:  # picture formats
                     print("STREAM: unsupported format "+str(f))
 #          except:
@@ -73,7 +143,7 @@ class PDFStream():
     # print formatuma:
     def __repr__(self):
 #        return str(self.data[0:16])
-        unc=0 #len(self.decode())
+        unc=len(self.decode())
         try:
             return "Stream(%d/%d):%s"%(len(self.data),unc,str(b''.join(self.fmt)) )
         except:
