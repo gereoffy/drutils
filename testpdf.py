@@ -82,7 +82,7 @@ class LZWDecode:
                         and self.bitspercode < 12
                     ):
                         self.bitspercode += 1
-#            print("LZW decoded %d -> %d bytes, %d runs"%(len(self.data),len(b''.join(baos)),len(baos)))
+            print("LZW bytesleft=%d  decoded %d -> %d bytes, %d runs"%(len(self.data)-self.bytepos, len(self.data),len(b''.join(baos)),len(baos)))
             return b''.join(baos)
 
 
@@ -143,7 +143,7 @@ class PDFStream():
     # print formatuma:
     def __repr__(self):
 #        return str(self.data[0:16])
-        unc=len(self.decode())
+        unc=0 #len(self.decode())
         try:
             return "Stream(%d/%d):%s"%(len(self.data),unc,str(b''.join(self.fmt)) )
         except:
@@ -491,8 +491,9 @@ def parse_pdf(d,debug=False):
 #                s=objs_value(objs,b'stream')
 #                if s and not b'/BitsPerComponent' in objs and not b'/Image' in objs and not b'/XML' in objs and not b'/XRef' in objs:
 #                if s and not b'/BitsPerComponent' in objs and not b'/Image' in objs and not b'/XRef' in objs: # a kepeket es a binaris xref-et kihagyjuk...
-                if stream and b'/ObjStm' in objs and not encrypt: # ebben lehet /URI elrejtve...
-                    dd=stream.decode()
+                if stream and not encrypt:
+                  dd=stream.decode()
+                  if b'/ObjStm' in objs: # ebben lehet /URI elrejtve...
 #                    print("OBJSTREAM(%d): %s"%(len(dd),bytes(dd[0:32])))
 #                    for m in [b'http://',b'HTTP://',b'https://',b'HTTPS://',b'/URI']:
 #                        mp=dd.find(m)
@@ -509,7 +510,7 @@ def parse_pdf(d,debug=False):
                     objs=oo # innentol ezt vizsgaljuk! az eredeti obj-ben ugyis csak Length, Filter, stream szokott lenni...
                     stream=None
             except:
-                print("OBJSTREAM-Exception!!! %s" % (traceback.format_exc()))
+                print("STREAM-Exception!!! %s" % (traceback.format_exc()))
                 errcnt+=1
 
 #            if oid==uriobjid and type(objs[3])==PDFString:
