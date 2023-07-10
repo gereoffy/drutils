@@ -486,10 +486,9 @@ def parse_pdf(d,debug=False):
                 dd=stream.decode()
 
                 if objs_value(objs,b'/Type')==[b'/EmbeddedFile']:
-                    dd=stream.decode()
                     ll=objs_value(objs,b'/Length')
                     print("FILESTREAM.size=%d/%s"%(len(dd),str(ll)))
-                    if debug: open("PDF.filestream.raw","wb").write(dd)
+#                    if debug: open("PDF.filestream.raw","wb").write(dd)
                     content.append((dd,streamname)) # fixme filename
 
                 if b'/ObjStm' in objs: # ebben lehet /URI elrejtve...
@@ -500,14 +499,14 @@ def parse_pdf(d,debug=False):
                     try:
                         offs=int(objs_value(objs,b'/First')[0])
                         onum=int(objs_value(objs,b'/N')[0])
-                        if debug: print("OBJSTREAM.offset=%d num=%d"%(offs,onum))
+                        if debug: print("OBJSTREAM.offset=%d num=%d data:"%(offs,onum),dd[:offs])
                         objsnum+=onum
                     except:
                         offs=0
                     pp,oo,ss=parse_pdf_obj(dd,offs,len(dd))
-                    if debug:
-                        print("OBJSTREAM<-",dd)
-                        print("OBJSTREAM->",oo)
+#                    if debug:
+#                        print("OBJSTREAM<-",dd[offs:])
+#                        print("OBJSTREAM->",oo)
                     objs=oo # innentol ezt vizsgaljuk! az eredeti obj-ben ugyis csak Length, Filter, stream szokott lenni...
                     stream=None
             except:
@@ -603,7 +602,7 @@ if __name__ == '__main__':
         print("=================== %s ====================="%(fn))
         cont,ret=parse_pdf(f.read(),True)
         print("ERRORS=%d"%(ret))
-        if ret: os.rename(fn,"hibas/"+fn.split("/")[-1])
+#        if ret: os.rename(fn,"hibas/"+fn.split("/")[-1])
 #        ret=parse_pdf(f.read())
 #        if ret: print(ret)
 #        if ret: print("=================== %s ====================="%(fn))
