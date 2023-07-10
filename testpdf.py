@@ -370,29 +370,31 @@ def parse_pdf(d,debug=False):
     if p<0: p=d.find(b'%FDF-',0,1024)
     if p<0: return None,99 # "not pdf"
     while p<pend and d[p]!=10 and d[p]!=13 and p<1024: p+=1
+
     q=p
-    while p<pend and (d[p]==10 or d[p]==13) and p<1024: p+=1
-    if p>=pend or d[p]!=37: # EOF vagy % jel
-        print("bad pdf header! p=%d"%(p))
-#        errcnt+=1
-#        p=q
-#    else:
+#   2102 newline: b'\n' 1
+#   2449 newline: b'\r' 1
+#   1355 newline: b'\r\n' 2
+#     18 newline: b'\n\n' 2    BAD!!!
+#     17 newline: b'\r\n\r\n' 4  BAD!!!
+#    while p<pend and (d[p]==10 or d[p]==13) and d[p]!=d[p-1] and p<1024: p+=1
+    if p<pend and d[p]==13: p+=1 # \r
+    if p<pend and d[p]==10: p+=1 # \n
     newline=d[q:p]
     if debug: print("newline:",newline,len(newline))
-    # skip comment:
+
     q=p
-    if d[p]==37:
+    if p<pend and d[p]==37:    # skip  %comment:
         while p<pend and d[p]!=10 and d[p]!=13 and p<1024: p+=1
-        while p<pend and (d[p]==10 or d[p]==13) and p<1024: p+=1
+#        while p<pend and (d[p]==10 or d[p]==13) and p<1024: p+=1
+        if p<pend and d[p]==13: p+=1 # \r
+        if p<pend and d[p]==10: p+=1 # \n
+    else:
+        print("bad pdf header! p=%d"%(p))
     if debug and p>q: print("comment:",d[q:p],p-q)
 
-
-#  38990 b'\n' 1
-#      4 b'\n\n' 2
-#   7363 b'\r' 1
-#  12341 b'\r\n' 2
-
     encrypt=0
+    xref={}
 
     # xref ?  de igazabol ez nekunk nem is kell, ugyse hasznaljuk... :)
     q=d.rfind(b'startxref',p) # len(d)-4096)
@@ -428,7 +430,39 @@ def parse_pdf(d,debug=False):
                 except:
                     encrypt=-1
                 if debug: print("CRYPT: "+str(encrypt))
-            if objs[0]!=b'xref' and b'/XRef' in objs:
+            if objs[0]==b'xref':
+                # ASCII xref table!
+                # [b'xref', 8, 1,
+                #           123239, 0, b'n',
+                #           15, 1,
+                #           120214, 0, b'n',
+                #           17, 13,
+                #           120292, 0, b'n',
+                #           120460, 0, b'n', 120493, 0, b'n', 120536, 0, b'n', 120645, 0, b'n', 120739, 0, b'n', 120937, 0, b'n', 121185, 0, b'n', 121472, 0, b'n', 121679, 0, b'n', 123128, 0, b'n', 123206, 0, b'n', 123410, 0, b'n',
+                # b'trailer', '<', b'/Size', 30, b'/Root', 15, 0, b'R', b'/Info', 16, 0, b'R', b'/ID', '[', bytearray(b'\x9f\xf0\x1e\x89\xfb^r\xed\xbeq{\x8fT\xb8Z('), bytearray(b'\x9f\xf0\x1e\x89\xfb^r\xed\xbeq{\x8fT\xb8Z('), ']', b'/Prev', 119711, '>']
+                i=1
+                while objs[i]!=b'trailer':
+                    if i+2>=len(objs):
+                        print("XREF: error! end of buffer before trailer")
+                        errcnt+=1
+                        break
+                    oid=objs[i]
+                    objn=objs[i+1]
+                    if debug: print("XREF: parsing oid range %d-%d"%(oid,oid+objn-1))
+                    i+=2
+                    for j in range(objn):
+                        if objs[i+2]==b'n' and objs[i]!=0: xref[oid+j]=(objs[i],objs[i+1])
+                        elif objs[i+2]==b'f':
+                            if oid==1 and i==3 and objs[i+1]==65535: # first node is free but id #1 instead of #0
+                                print("XREF: Warning, bad OID for root node! fixing...")
+                                oid=0
+                        else:
+                            print("XREF: error! invalid type: i=%d j=%d o:"%(i,j),objs[i:i+3])
+                            errcnt+=1
+                        i+=3
+
+            elif b'/XRef' in objs:
+                # Binary xref table!
                 dd=stream.decode()
                 if debug: print("XREF binary:",dd.hex(' '))
                 # dd = binary xref table
@@ -438,6 +472,21 @@ def parse_pdf(d,debug=False):
     else:
         print('XREF: NOT FOUND!!!')
         errcnt+=10
+
+    # verify xref if available:
+    if xref:
+        print("XREF dom:", xref)
+        for oid in xref:
+            pos,gen=xref[oid]
+            if pos<p-len(newline) or p>=pend:
+                print("XREF: oid #%d pos=%d BAD! (not in range %d - %d)"%(oid,pos,p,pend))
+                errcnt+=1
+                continue
+            if d[pos:pos+16].startswith(b'%d %d obj'%(oid,gen)): continue   # stimmel! (az esetek 99%-ban a generation szam 0, igy ez gyorsabb!)
+            if d[pos:pos+16].startswith(b'\n%d %d obj'%(oid,gen)): continue # WTF?
+            q,objs,stream=parse_pdf_obj(d,pos,pend,stop=b'obj')      # [227, 1, b'obj']
+#            if len(objs)==3 and objs[2]==b'obj' and objs[0]==oid: continue # megis jo!
+            print("XREF: oid #%d pos=%d BAD! data:"%(oid,pos),d[pos:pos+16],objs[:5])
 
 
     # ignore garbage before first obj
