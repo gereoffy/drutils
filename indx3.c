@@ -57,11 +57,11 @@ void parseindx(unsigned char* p){
 	time_t timep=(unsigned int)t;
 	struct tm *tt=localtime(&timep);
 
-	unsigned long long fs=*((unsigned long long*)(p+o+0x40));
+	unsigned long long fs=*((unsigned long long*)(p+o+0x40)) & 0x0000FFFFFFFFFFFFLL;;
 	int nl=p[o+0x50];
       if(n!=0x10 || nl>0){
-	printf("%04X  entry  T=%8lld (%d.%02d.%02d)   size=%d size=%dMB  name=0x%X (%d) ",o,t,
-		1900+tt->tm_year,1+tt->tm_mon,tt->tm_mday,  s,(int)(fs/(1024*1024)),n,nl);
+	printf("%04X  entry  T=%8lld (%d.%02d.%02d)   size=%d size=%dkB  name=0x%X (%d) ",o,t,
+		1900+tt->tm_year,1+tt->tm_mon,tt->tm_mday,  s,(int)(fs/(1024)),n,nl);
 //	printf("%04X  entry  T=%8lld (%s)   size=%d size=%dMB  name=0x%X (%d) ",o,t,
 //		ctime(&timep),  s,(int)(fs/(1024*1024)),n,nl);
 	for(i=0;i<nl;i++) putchar(p[o+0x52+2*i]);
@@ -313,8 +313,23 @@ int main(){
 
 //A_mbr_ntfs5P.img  B_ntfs2.img  C_ntfs1.img  D_ntfs3.img  E_mbr_ntfs4.img
 
-FILE* f=fopen("/dev/sda","rb");
-//FILE* f=fopen("/home/sda_orig.img","rb");
+//FILE* f=fopen("/dev/sda","rb");
+FILE* f=fopen("raw2.img","rb");
+
+
+#if 0
+// search for FAT16/FAT32 directory entries:
+// https://en.wikipedia.org/wiki/Design_of_the_FAT_file_system#Directory_table
+while(fread(buffer,32,1,f)>0){
+    int i;
+//    if(buffer[8]=='P' && buffer[9]=='D' && buffer[10]=='F'){
+    if(buffer[8]=='J' && buffer[9]=='P' && buffer[10]=='G'){
+        for(i=0;i<8+3;i++) if(buffer[i]<32) break;
+        if(i==8+3) printf("%.8s.%.3s\n",buffer,buffer+8);
+    }
+}
+#endif
+
 
 //fseek(f,0x186A000000LL,0);
 //fseek(f,0x3FFC43000LL,0);
