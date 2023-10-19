@@ -1,4 +1,4 @@
-#! /usr/bin/python3.11
+#! /usr/bin/python3
 
 import os,sys
 import zipfile
@@ -20,6 +20,7 @@ for fnev in sys.argv[1:] if len(sys.argv)>1 else ["f22341399.docx"]:
           if child.text.startswith("20"):
             d=str(child.text)
 #            print('"'+d+'"')
+            if d.endswith("Z"): d=d[:-1]
             d=datetime.fromisoformat(d).timestamp()
             if not datum or d>datum: datum=d
 #            print(d)
