@@ -378,6 +378,54 @@ def testdxf(fnev):
     return 10
 
 ###############################################################################################################################
+##############################################  WMF  ##########################################################################
+###############################################################################################################################
+
+def testwmf(data,debug=False):
+    def getint(i,l): return int.from_bytes(data[i:i+l],byteorder="little",signed=False)
+    def getsint(i,l): return int.from_bytes(data[i:i+l],byteorder="little",signed=True)
+    # SpecialHeader:
+    magic=data[0:4]
+    if debug: print(magic,data[4:6])  # b'\xd7\xcd\xc6\x9a' b'\x00\x00'
+    x1=getsint(6,2)
+    y1=getsint(8,2)
+    x2=getsint(10,2)
+    y2=getsint(12,2)
+    dpi=getint(14,2)
+    rvd=getint(16,4)
+    crc=getint(20,2)
+    if debug: print(x1,y1,x2,y2,dpi,rvd,crc) # 0 0 1359 1360 96 0 22382
+    # Header:
+    p=22
+    ftyp=getint(p,2) # MetafileType
+    hsize=getint(p+2,2)
+    vers=getint(p+4,2)
+    size=getint(p+6,4)
+    objs=getint(p+10,2)
+    maxr=getint(p+12,4)
+    memb=getint(p+16,2)
+    if debug: print(ftyp,vers,hsize,size,objs,maxr,memb) # 1 verison=768 hsize=9 size=985 objs=7 maxr=658 memb=0
+    if debug: print((len(data)-p)/2) # ==size
+    p+=2*hsize
+    # Records:
+    num=0
+    while p+6<=len(data):
+        size=getint(p,4)
+        func=getint(p+4,2)
+        if debug: print(func,size)
+        if size>maxr:
+            print("Invalid record size: %d > %d"%(size,maxr))
+            return 2
+        p+=size*2
+        if func==0:
+            if p==len(data): return 0  # pont a vegere ertunk!
+            break
+        num+=1
+    print("WMF: total %d records read, %d bytes left"%(num,len(data)-p))
+    return 1
+
+
+###############################################################################################################################
 ##############################################  PNG  ##########################################################################
 ###############################################################################################################################
 
@@ -451,6 +499,7 @@ def testpng(data):
 
 def testfile(f,size,fnev):
     d=f.read(4096)
+    if d[0:6]==b'\xd7\xcd\xc6\x9a\x00\x00': return testwmf(d+f.read()),"wmf" # may be very small...
     if len(d)<4096: return -1,"small"
 
     if d[0]==0x50 and d[1]==0x4b and d[2]==3 and d[3]==4: return testzip(d+f.read())#,"zip"
@@ -497,7 +546,7 @@ def testdir(path):
                 cnt+=1
     return cnt
 
-testdir("/2/")
+testdir("wmf/")
 exit()
 
 f=open("/dev/sda","rb")
