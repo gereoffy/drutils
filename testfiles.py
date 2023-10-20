@@ -31,6 +31,13 @@ try:
 except:
   support_spss=False
 
+# pip3 install ezdxf
+try:
+  import ezdxf
+  support_dxf=True
+except:
+  support_dxf=False
+
 # pdf
 from testpdf import parse_pdf
 from testjpeg import testjpeg
@@ -358,6 +365,17 @@ def testspss(fnev):
     print("SPSS.open-Exception!!! %s" % (traceback.format_exc()))
     return 10
 
+###############################################################################################################################
+##############################################  DXF  ##########################################################################
+###############################################################################################################################
+
+def testdxf(fnev):
+  try:
+    doc = ezdxf.readfile(fnev)
+    return 0
+  except:
+    print("DXF.open-Exception!!! %s" % (traceback.format_exc()))
+    return 10
 
 ###############################################################################################################################
 ##############################################  PNG  ##########################################################################
@@ -447,6 +465,8 @@ def testfile(f,size,fnev):
 
 #    if d[0:4]==b'{\\rt': return testrtf(d),"rtf"
 
+    if support_dxf and fnev.lower().endswith(".dxf"): return testdxf(fnev),"dxf"
+
     return -1,"???"
 
 
@@ -477,8 +497,7 @@ def testdir(path):
                 cnt+=1
     return cnt
 
-testdir("/home/mentes-ikovach/MENTES")
-#testdir("/mnt/Kovach2023")
+testdir("/2/")
 exit()
 
 f=open("/dev/sda","rb")
