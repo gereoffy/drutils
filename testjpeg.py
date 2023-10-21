@@ -1,4 +1,4 @@
-#! /usr/bin/python3.11
+#! /usr/bin/python3
 
 from struct import unpack
 import math
@@ -369,6 +369,50 @@ def testjpeg(d):
         for dc1,dc2 in zip(prevdcline,dcline):
             s+="\x1b[48;2;%d;%d;%dm"%ColorConversion(dc1)
             s+="\x1b[38;2;%d;%d;%dm\u2584"%ColorConversion(dc2)
+        #print(s,'\x1b[0m')
+        sys.stderr.write(s+'\x1b[0m\n')
+        return
+
+    palette16=[
+        (0,0,0), # 0
+        (212,26,26), # 1
+        (34,211,39), # 2
+        (211,211,48), # 3
+        (28,15,210), # 4
+        (214,32,211), # 5
+        (46,212,213), # 6
+        (201,201,201), # 7
+        # bright:
+        (146,146,146), # 0
+        (250,32,32), # 1
+        (43,252,48), # 2
+        (253,254,60), # 3
+        (36,20,250), # 4
+        (252,40,252), # 5
+        (57,253,253), # 6
+        (216,216,216) # 7
+    ]
+
+    def rgb16(rgb):
+        best,bestd=-1,0
+        for x in range(16):
+            c=palette16[x]
+            def dif(i): return (c[i]-rgb[i])*(c[i]-rgb[i])
+            d=dif(0)+dif(1)+dif(2)
+            if best<0 or d<bestd: best,bestd=x,d
+        return best if best<8 else 60+(best-8)
+
+#        r,g,b=int(rgb[0]),int(rgb[1]),int(rgb[2])
+#        if r<128 and g<128 and b<128:
+#            return (r>>6)|((g>>6)<<1)|((b>>6)<<2)  # normal colors
+#        return 60 + (r>>7)|((g>>7)<<1)|((b>>7)<<2) # bright colors
+
+    def print_aa16(dcline,prevdcline):
+        s=u""
+        if not prevdcline: prevdcline=dcline
+        for dc1,dc2 in zip(prevdcline,dcline):
+            s+="\x1b[%dm"%(40+rgb16(ColorConversion(dc1)))
+            s+="\x1b[%dm\u2584"%(30+rgb16(ColorConversion(dc2)))
         #print(s,'\x1b[0m')
         sys.stderr.write(s+'\x1b[0m\n')
         return
