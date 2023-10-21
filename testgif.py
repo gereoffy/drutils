@@ -64,16 +64,18 @@ def lzw_decode(data, code_size):
         while True:
             code = 0
             for i in range(dictionary.code_len):
-                code |= ((byte >> bit) & 0x01) << i
-                bit += 1
                 if bit >= 8:
                     bit = 0
+#                    if p>=len(data): break # EOF
                     byte=data[p]
                     p+=1
+                code |= ((byte >> bit) & 0x01) << i
+                bit += 1
             yield dictionary.decode(code)
     except EndOfData:
         print("GIF EndOfData:",p,len(data))
-
+    except Exception as e:
+        print("GIF lzw error:",repr(e))
 
 class Frame:
     def __init__(self, f, colors):
@@ -127,7 +129,7 @@ def testgif(f):
                 extension_type = f.read(1)[0]  # 0x01 = label, 0xfe = comment
                 ext_data = read_blockstream(f)
             else:
-                raise ValueError('Bad block {0:2x}'.format(block_type))
+                return 20 # raise ValueError('Bad block {0:2x}'.format(block_type))
         print("GIF: %d frames decoded OK"%ok)
         return 0 if ok else 1
     except Exception as e:
@@ -136,4 +138,4 @@ def testgif(f):
 
 
 if __name__ == "__main__":
-    with open("ball.gif", 'rb') as f: testgif(f)
+    with open("hibas.gif", 'rb') as f: testgif(f)
