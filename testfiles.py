@@ -38,9 +38,9 @@ try:
 except:
   support_dxf=False
 
-# pdf
 from testpdf import parse_pdf
 from testjpeg import testjpeg
+from testgif import testgif
 
 
 ###############################################################################################################################
@@ -505,6 +505,7 @@ def testfile(f,size,fnev):
     if d[0]==0x50 and d[1]==0x4b and d[2]==3 and d[3]==4: return testzip(d+f.read())#,"zip"
     if d[0]==0x89 and d[1:4]==b'PNG' and d[4]==0x0D and d[5]==0x0A and d[6]==0x1A: return testpng(d+f.read()),"png"
     if d[0:4]==b'8BPS' and d[4]==0 and d[5]==1: return testpsd(d+f.read()),"psd"
+    if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
 
 #    if support_spss and d[0:4]==b'$FL2': return testspss(fnev),"sav"
     if support_ole and d[0]==0xD0 and d[1]==0xCF and d[2]==0x11 and d[3]==0xE0 and d[4]==0xA1 and d[5]==0xB1: return testole(d+f.read())#,"ole"
@@ -546,7 +547,7 @@ def testdir(path):
                 cnt+=1
     return cnt
 
-testdir("wmf/")
+testdir("/2/WPS2016/WPS2016/Bilder/Gefahren/")
 exit()
 
 f=open("/dev/sda","rb")
