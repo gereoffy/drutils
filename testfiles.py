@@ -41,6 +41,7 @@ except:
 from testpdf import parse_pdf
 from testjpeg import testjpeg
 from testgif import testgif
+from testtif import testtif
 
 
 ###############################################################################################################################
@@ -500,12 +501,14 @@ def testpng(data):
 def testfile(f,size,fnev):
     d=f.read(4096)
     if d[0:6]==b'\xd7\xcd\xc6\x9a\x00\x00': return testwmf(d+f.read()),"wmf" # may be very small...
+    if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
+    if d[0]==0x89 and d[1:4]==b'PNG' and d[4]==0x0D and d[5]==0x0A and d[6]==0x1A: return testpng(d+f.read()),"png"
+    if d[0:4] in [b'MM\x00\x2A',b'II\x2A\x00']: return testtif(d+f.read()),"tif"
+
     if len(d)<4096: return -1,"small"
 
     if d[0]==0x50 and d[1]==0x4b and d[2]==3 and d[3]==4: return testzip(d+f.read())#,"zip"
-    if d[0]==0x89 and d[1:4]==b'PNG' and d[4]==0x0D and d[5]==0x0A and d[6]==0x1A: return testpng(d+f.read()),"png"
     if d[0:4]==b'8BPS' and d[4]==0 and d[5]==1: return testpsd(d+f.read()),"psd"
-    if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
 
 #    if support_spss and d[0:4]==b'$FL2': return testspss(fnev),"sav"
     if support_ole and d[0]==0xD0 and d[1]==0xCF and d[2]==0x11 and d[3]==0xE0 and d[4]==0xA1 and d[5]==0xB1: return testole(d+f.read())#,"ole"
@@ -529,10 +532,11 @@ def testdir(path):
     for n in os.listdir(path):
         nn=os.path.join(path,n)
         print("\n\n==================== %s ======================\n"%(nn))
-        s=os.stat(nn)
-        if stat.S_ISDIR(s.st_mode):
+        try:
+          s=os.stat(nn)
+          if stat.S_ISDIR(s.st_mode):
             cnt+=testdir(nn)
-        else:
+          else:
             f=open(nn,"rb")
             res,ext=testfile(f,s.st_size,nn)
             f.close()
@@ -545,9 +549,11 @@ def testdir(path):
             if res<0:
                 print("__result=DUNNO:",ext,nn)
                 cnt+=1
+        except Exception as e:
+          print("Cannot open file:",repr(e))
     return cnt
 
-testdir("/2/WPS2016/WPS2016/Bilder/Gefahren/")
+testdir("tif/")
 exit()
 
 f=open("/dev/sda","rb")
