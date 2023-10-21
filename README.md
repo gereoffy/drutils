@@ -20,6 +20,6 @@ testfiles.py - file content validator/verifier, supports:
 
 testjpeg.py - jpeg parser & validator, used by testfiles  
 testpdf.py  - pdf  parser & validator, used by testfiles  
-testgif.py  - gif  parser & validator, used by testfiles
-testtif.py  - tif  parser & validator, used by testfiles
+testgif.py  - gif  parser & validator, used by testfiles  
+testtif.py  - tif  parser & validator, used by testfiles  
 lznt1.py    - ntfs decompress, used by lstree.py (not my code)  
