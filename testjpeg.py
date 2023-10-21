@@ -393,6 +393,30 @@ def testjpeg(d):
         (216,216,216) # 7
     ]
 
+    def rgb16dither(rgb):
+        bests=[]
+        for x in range(16):
+            c=palette16[x]
+            def dif(i): return (c[i]-rgb[i])*(c[i]-rgb[i])
+            d=dif(0)+dif(1)+dif(2)
+            bests.append((d,x))
+        bests.sort() # TODO: optimize!
+        bg=bests[0][1] # best color
+        fg=bests[1][1] # 2nd best
+        c1=palette16[bg]
+        c2=palette16[fg]
+        besti,bestd=-1,0
+        for i in range(5):
+#            f=[0,0.25,0.5,0.75,1][i]
+            f=[0,0.2,0.4,0.7,1][i]
+            def dif(i):
+                c=c1[i]+(c2[i]-c1[i])*f
+                return (c-rgb[i])*(c-rgb[i])
+            d=dif(0)+dif(1)+dif(2)
+            if besti<0 or d<bestd: besti,bestd=i,d
+        return "\x1b[%dm\x1b[%dm%s"%( 40+bg if bg<8 else 100+bg-8, 30+fg if fg<8 else 90+fg-8, " ░▒▓█"[besti])
+
+
     def rgb16(rgb):
         best,bestd=-1,0
         for x in range(16):
@@ -407,10 +431,11 @@ def testjpeg(d):
 #            return (r>>6)|((g>>6)<<1)|((b>>6)<<2)  # normal colors
 #        return 60 + (r>>7)|((g>>7)<<1)|((b>>7)<<2) # bright colors
 
-    def print_aa16(dcline,prevdcline):
+    def print_aa16(dcline,prevdcline,dither=False):
         s=u""
         if not prevdcline: prevdcline=dcline
         for dc1,dc2 in zip(prevdcline,dcline):
+            if dither: s+=rgb16dither(ColorConversion(dc1)) ; continue
             s+="\x1b[%dm"%(40+rgb16(ColorConversion(dc1)))
             s+="\x1b[%dm\u2584"%(30+rgb16(ColorConversion(dc2)))
         #print(s,'\x1b[0m')
@@ -547,7 +572,7 @@ def testjpeg(d):
             if mcu_cnt%mcuw==0:
               if (A>>4)==0:
                 if dcy%mcuhs==0: prevdc=dc
-                if dcy%mcuhs==(mcuhs//2): print_aa(dc,prevdc)
+                if dcy%mcuhs==(mcuhs//2): print_aa16(dc,prevdc,True)
               dcy+=1
               dcx=0
               dc=[]
