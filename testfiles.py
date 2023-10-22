@@ -443,11 +443,11 @@ def testpng(data):
     ulen=0
     zl=zlib.decompressobj()
     p=8
-    while p<len(data):
+    while p+8<=len(data):
         l,=unpack(">L",data[p:p+4])
         c=data[p+4:p+8] # chunk name
-        print(p,c,l)
         chunks.append(c)
+        print(p,c,l)
         crc = zlib.crc32(data[p+4:p+8+l])
         ocrc,=unpack(">L",data[p+8+l:p+12+l])
         if crc!=ocrc:
@@ -463,13 +463,14 @@ def testpng(data):
             print(w,h,depth,color,compr,filt,ilace)
         #print (crc^ocrc) # print(crc,ocrc)
         p+=12+l
+        if c==b'IEND': break # EOF
 
     zdata=zl.flush()
     ulen+=len(zdata)
 
     if p!=len(data):
         print(len(data)-p,"bytes left")
-        errcnt+=1
+#        errcnt+=1
 
     if chunks[0]!=b'IHDR' or chunks[-1]!=b'IEND':
         print("missing IDHR/IEND")
@@ -478,10 +479,24 @@ def testpng(data):
     dmap={0:1,2:3,3:1,4:2,6:4}
     bits=depth*dmap.get(color,0) # bits/pixel
     #bits=depth*(1+(color&2)+(color>>2))
-    scanlines=(((h+7)//8)*15) if ilace else h             # https://www.w3.org/TR/2003/REC-PNG-20031110/#8Interlace
+#    scanlines=(((h+7)//8)*15) if ilace else h             # https://www.w3.org/TR/2003/REC-PNG-20031110/#8Interlace
+    if ilace:
+        hh=h//8      # teljes 8x blockok szama
+        hp=h-hh*8    # utolso block magassaga (0-7)
+#   1 6 4 6 2 6 4 6  = 1246 = 4
+#   7 7 7 7 7 7 7 7  = 1245 7 = 5
+#   5 6 5 6 5 6 5 6  = 1245 7 56 = 7
+#   7 7 7 7 7 7 7 7  = 1245 7 56 7 = 8
+#   3 6 4 6 3 6 4 6  = 1245 7 56 7 346 = 11
+#   7 7 7 7 7 7 7 7  = 1245 7 56 7 346 7 = 12
+#   5 6 5 6 5 6 5 6  = 1245 7 56 7 346 7 56 = 14
+#   7 7 7 7 7 7 7 7  = 1245 7 56 7 346 7 56 7 = 15
+        scanlines=hh*15 + [ 0, 4, 5, 7, 8, 11, 12, 14, 15][hp]
+    else: scanlines=h
     rawsize=((w*bits+7)//8)*h + scanlines
 
-    print("Uncompressed data size:",clen,ulen,rawsize,ilace,scanlines)
+# Uncompressed data size: 775   2699 2716  1   52  37x18x32bits
+    print("Uncompressed data size:",clen,ulen,rawsize,ilace,scanlines,w,h,bits)
     if ulen!=rawsize: errcnt+=1
 
 #    if errcnt==0:
@@ -500,19 +515,20 @@ def testpng(data):
 
 def testfile(f,size,fnev):
     d=f.read(4096)
+    if len(d)<256: return -1,"small"
+
     if d[0:6]==b'\xd7\xcd\xc6\x9a\x00\x00': return testwmf(d+f.read()),"wmf" # may be very small...
     if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
     if d[0]==0x89 and d[1:4]==b'PNG' and d[4]==0x0D and d[5]==0x0A and d[6]==0x1A: return testpng(d+f.read()),"png"
     if d[0:4] in [b'MM\x00\x2A',b'II\x2A\x00']: return testtif(d+f.read()),"tif"
 
-    if len(d)<4096: return -1,"small"
+#    if len(d)<4096: return -1,"small"
 
     if d[0]==0x50 and d[1]==0x4b and d[2]==3 and d[3]==4: return testzip(d+f.read())#,"zip"
     if d[0:4]==b'8BPS' and d[4]==0 and d[5]==1: return testpsd(d+f.read()),"psd"
 
 #    if support_spss and d[0:4]==b'$FL2': return testspss(fnev),"sav"
     if support_ole and d[0]==0xD0 and d[1]==0xCF and d[2]==0x11 and d[3]==0xE0 and d[4]==0xA1 and d[5]==0xB1: return testole(d+f.read())#,"ole"
-
     if d[0]==0xff and d[1]==0xd8 and d[2]==0xff and d[3]>=0xC0: return testjpeg(d+f.read()),"jpg"
     if d.find(b'%PDF-',0,32)>=0: return testpdf(d+f.read()),"pdf"
 
@@ -537,11 +553,9 @@ def testdir(path):
           if stat.S_ISDIR(s.st_mode):
             cnt+=testdir(nn)
           else:
-            f=open(nn,"rb")
-            res,ext=testfile(f,s.st_size,nn)
-            f.close()
+            with open(nn,"rb") as f: res,ext=testfile(f,s.st_size,nn)
             if res>0:
-                print("__result=HIBAS:",ext,nn)
+                print("__result=BAD:",ext,nn)
                 cnt+=1
             if res==0:
                 print("__result=OK:",ext,nn)
@@ -553,7 +567,8 @@ def testdir(path):
           print("Cannot open file:",repr(e))
     return cnt
 
-testdir("tif/")
+#testdir("/2/")
+testdir("png/")
 exit()
 
 f=open("/dev/sda","rb")
