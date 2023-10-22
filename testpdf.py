@@ -52,14 +52,15 @@ class LZWDecode:
                     self.bytepos = self.bytepos + 1
             return value
 
-        def decode(self) -> bytes:
+        def decode(self, strict=True) -> bytes:
             cW = self.CLEARDICT
             baos = []
             while True:
                 pW = cW
                 cW = self.next_code()
                 if cW == -1:
-                    raise BufferError("End of buffer reached without LZW stop code")
+                    if strict: raise BufferError("End of buffer reached without LZW stop code")
+                    break
                 if cW == self.STOP:
                     break
                 elif cW == self.CLEARDICT:
@@ -83,8 +84,8 @@ class LZWDecode:
                     ):
                         self.bitspercode += 1
             bleft=len(self.data)-self.bytepos
-            print("LZW bytesleft=%d  decoded %d -> %d bytes, %d runs"%(bleft, len(self.data),len(b''.join(baos)),len(baos)))
-            if bleft>3: raise BufferError("%d bytes left in LZW buffer"%(bleft))
+#            print("LZW bytesleft=%d  decoded %d -> %d bytes, %d runs"%(bleft, len(self.data),len(b''.join(baos)),len(baos)))
+            if strict and bleft>3: raise BufferError("%d bytes left in LZW buffer"%(bleft))
             return b''.join(baos)
 
 
@@ -464,7 +465,9 @@ def parse_pdf(d,debug=False):
             elif b'/XRef' in objs:
                 # Binary xref table!
                 dd=stream.decode()
-                if debug: print("XREF binary:",dd.hex(' '))
+                if debug:
+                    print("XREF binary:",dd.hex(' '))
+                    print(objs)
                 # dd = binary xref table
         except:
             print('XREF: exception!!! '+traceback.format_exc())
@@ -478,12 +481,13 @@ def parse_pdf(d,debug=False):
         print("XREF dom:", xref)
         for oid in xref:
             pos,gen=xref[oid]
-            if pos<p-len(newline) or p>=pend:
+            if pos<p-len(newline) or pos+5>=pend:
                 print("XREF: oid #%d pos=%d BAD! (not in range %d - %d)"%(oid,pos,p,pend))
                 errcnt+=1
                 continue
-            if d[pos:pos+16].startswith(b'%d %d obj'%(oid,gen)): continue   # stimmel! (az esetek 99%-ban a generation szam 0, igy ez gyorsabb!)
-            if d[pos:pos+16].startswith(b'\n%d %d obj'%(oid,gen)): continue # WTF?
+            if d[pos]==13: pos+=1
+            if d[pos]==10: pos+=1
+            if d[pos:pos+16].startswith(b'%d %d obj'%(oid,gen)): continue   # OK!
             q,objs,stream=parse_pdf_obj(d,pos,pend,stop=b'obj')      # [227, 1, b'obj']
 #            if len(objs)==3 and objs[2]==b'obj' and objs[0]==oid: continue # megis jo!
             print("XREF: oid #%d pos=%d BAD! data:"%(oid,pos),d[pos:pos+16],objs[:5])
