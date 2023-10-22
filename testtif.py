@@ -2,6 +2,22 @@
 
 from testpdf import LZWDecode,inflate
 
+def unpackbits(d):
+    p=0
+    l=0
+    while p<len(d):
+        c=int.from_bytes(d[p:p+1],byteorder="little",signed=True)
+#        print(p,c)
+        p+=1
+        if c==-128: continue
+        if c>=0:
+            l+=1+c
+            p+=1+c
+        else:
+            l+=1-c
+            p+=1
+#    print("UnPackbits: %d -> %d"%(p,l))
+    return l
 
 tagnames={}
 try:
@@ -81,13 +97,17 @@ def testtif(data):
         rawsize1 = numstrips*stripsize * ((tagvalues.get(256,[1])[0]*bits+7)//8) # full strips
         rawsize2 = tagvalues.get(257,[1])[0] * ((tagvalues.get(256,[1])[0]*bits+7)//8) # partial strips
         if comp and datasize<=len(data)-(8+2+12+4): ok=True
-        if comp in ["LZW","DEFLATE"]:
+        if comp in ["LZW","DEFLATE","PACKBITS","UNCOMPRESSED"]:
+          if comp!="UNCOMPRESSED":
+            print("TIFF decompress from %d bytes, comp:"%datasize,comp)
             datasize=0
             for o,l in zip(tagvalues[273],tagvalues[279]): # StripOffsets,StripByteCounts
+              if comp=="PACKBITS": datasize+=unpackbits(data[o:o+l])
+              else:
                 d=LZWDecode(data[o:o+l]).decode(False) if comp=="LZW" else inflate(data[o:o+l])
                 datasize+=len(d)
-        print("TIFF %s bits=%d  datasize=%d  rawsize=%d/%d  pixels=%d"%(str(comp),bits,datasize,rawsize1,rawsize2, pixels ))
-        if comp in ["LZW","DEFLATE","UNCOMPRESSED"] and datasize!=rawsize1 and datasize!=rawsize2: ok=False # bad size
+            if datasize!=rawsize1 and datasize!=rawsize2: ok=False # bad size
+        print("TIFF %s bits=%d  datasize=%d  rawsize=%d/%d  pixels=%d"%(str(comp),bits,datasize,rawsize1,rawsize2, pixels ), ok)
       ifd=getint(ifd+2+12*num,4)
       print("Next IFD:",ifd)
       if ifd==0: return 0 if ok else 1 # OK
@@ -98,4 +118,5 @@ if __name__ == "__main__":
 #    with open("tif/Griffmulde_R15080534.tif", 'rb') as f: testtif(f.read())
 #    with open("tif/M1401d433.tif", 'rb') as f: testtif(f.read())
 #    with open("tif/500542_tif_0.tif", 'rb') as f: testtif(f.read())
+    with open("tif2/206182_tif_1.tif", 'rb') as f: testtif(f.read())
     with open("tif2/470621_tif_0.tif", 'rb') as f: testtif(f.read())
