@@ -1,6 +1,6 @@
 #!/usr/bin/python3
 
-from testpdf import LZWDecode
+from testpdf import LZWDecode,inflate
 
 
 tagnames={}
@@ -81,13 +81,13 @@ def testtif(data):
         rawsize1 = numstrips*stripsize * ((tagvalues.get(256,[1])[0]*bits+7)//8) # full strips
         rawsize2 = tagvalues.get(257,[1])[0] * ((tagvalues.get(256,[1])[0]*bits+7)//8) # partial strips
         if comp and datasize<=len(data)-(8+2+12+4): ok=True
-        if comp=="LZW":
+        if comp in ["LZW","DEFLATE"]:
             datasize=0
             for o,l in zip(tagvalues[273],tagvalues[279]): # StripOffsets,StripByteCounts
-                d=LZWDecode(data[o:o+l]).decode(False)
+                d=LZWDecode(data[o:o+l]).decode(False) if comp=="LZW" else inflate(data[o:o+l])
                 datasize+=len(d)
         print("TIFF %s bits=%d  datasize=%d  rawsize=%d/%d  pixels=%d"%(str(comp),bits,datasize,rawsize1,rawsize2, pixels ))
-        if comp in ["LZW","UNCOMPRESSED"] and datasize!=rawsize1 and datasize!=rawsize2: ok=False # bad size
+        if comp in ["LZW","DEFLATE","UNCOMPRESSED"] and datasize!=rawsize1 and datasize!=rawsize2: ok=False # bad size
       ifd=getint(ifd+2+12*num,4)
       print("Next IFD:",ifd)
       if ifd==0: return 0 if ok else 1 # OK
@@ -98,4 +98,4 @@ if __name__ == "__main__":
 #    with open("tif/Griffmulde_R15080534.tif", 'rb') as f: testtif(f.read())
 #    with open("tif/M1401d433.tif", 'rb') as f: testtif(f.read())
 #    with open("tif/500542_tif_0.tif", 'rb') as f: testtif(f.read())
-    with open("tif/33563.tif", 'rb') as f: testtif(f.read())
+    with open("tif2/470621_tif_0.tif", 'rb') as f: testtif(f.read())
