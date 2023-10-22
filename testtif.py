@@ -106,7 +106,7 @@ def testtif(data):
               else:
                 d=LZWDecode(data[o:o+l]).decode(False) if comp=="LZW" else inflate(data[o:o+l])
                 datasize+=len(d)
-            if datasize!=rawsize1 and datasize!=rawsize2: ok=False # bad size
+          if datasize!=rawsize1 and datasize!=rawsize2: ok=False # bad size
         print("TIFF %s bits=%d  datasize=%d  rawsize=%d/%d  pixels=%d"%(str(comp),bits,datasize,rawsize1,rawsize2, pixels ), ok)
       ifd=getint(ifd+2+12*num,4)
       print("Next IFD:",ifd)
