@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+from testpdf import LZWDecode
+
 
 tagnames={}
 try:
@@ -46,8 +48,9 @@ def testtif(data):
     comp=None
     ok=False
     while True:
-      if ifd<8 or ifd+2>len(data): return 10 # bad ifd pointer
+      if ifd<8 or ifd+2>len(data): print("TIFF: bad ifd pointer:",ifd,len(data)) ; break
       num=getint(ifd,2)
+      if num<4 or num>64: print("TIFF: unusual num of attribs:",num) ; break # unusual number of attribs...  (typical range: 12..19)
       tagvalues={}
       for i in range(num):
         p=ifd+2+12*i
@@ -56,6 +59,7 @@ def testtif(data):
         cnt=getint(p+4,4) # The number of items in the tag data
         ofs=getint(p+8,4) # The byte offset to the data items
         size=typlen.get(typ,1)*cnt
+        if not typ in typmap or cnt<=0 or size>len(data): break # BAD!!!
         if size<=4: ofs=p+8 # hack
         value="#%d"%ofs
         if typ==2: value=data[ofs:ofs+cnt-1] # ascii
@@ -67,16 +71,25 @@ def testtif(data):
         if tag==259: comp=value=tiffcompress.get(value[0],value) # compression
         print("ifd#%d: "%i,tag,tagnames.get(tag,"%d"%tag),typmap.get(typ,"%d"%typ),"x",cnt,"=",str(value)[:100])
       # end of IFD
-      if 273 in tagvalues and 279 in tagvalues and 258 in tagvalues:
+      if 273 in tagvalues and 258 in tagvalues:
+        if not 279 in tagvalues: tagvalues[279]=[len(data)-tagvalues[273][0]]
         datasize=sum(tagvalues[279]) # StripByteCounts
         bits=sum(tagvalues[258])
         pixels=tagvalues.get(256,[1])[0]*tagvalues.get(257,[1])[0]
-        rawsize=tagvalues.get(257,[1])[0] * ((tagvalues.get(256,[1])[0]*bits+7)//8)
-        print("TIFF %s bits=%d  datasize=%d  rawsize=%d  pixels=%d"%(str(comp),bits,datasize,rawsize, pixels ))
+        stripsize=tagvalues.get(278,[1])[0]
+        numstrips=(tagvalues.get(257,[1])[0]+stripsize-1)//stripsize
+        rawsize1 = numstrips*stripsize * ((tagvalues.get(256,[1])[0]*bits+7)//8) # full strips
+        rawsize2 = tagvalues.get(257,[1])[0] * ((tagvalues.get(256,[1])[0]*bits+7)//8) # partial strips
         if comp and datasize<=len(data)-(8+2+12+4): ok=True
-        if comp=="UNCOMPRESSED" and datasize!=rawsize: ok=False # bad size
+        if comp=="LZW":
+            datasize=0
+            for o,l in zip(tagvalues[273],tagvalues[279]): # StripOffsets,StripByteCounts
+                d=LZWDecode(data[o:o+l]).decode(False)
+                datasize+=len(d)
+        print("TIFF %s bits=%d  datasize=%d  rawsize=%d/%d  pixels=%d"%(str(comp),bits,datasize,rawsize1,rawsize2, pixels ))
+        if comp in ["LZW","UNCOMPRESSED"] and datasize!=rawsize1 and datasize!=rawsize2: ok=False # bad size
       ifd=getint(ifd+2+12*num,4)
-      print("Next IFD:",ifd,comp)
+      print("Next IFD:",ifd)
       if ifd==0: return 0 if ok else 1 # OK
     return 10 # no END ifd?
 
@@ -85,4 +98,4 @@ if __name__ == "__main__":
 #    with open("tif/Griffmulde_R15080534.tif", 'rb') as f: testtif(f.read())
 #    with open("tif/M1401d433.tif", 'rb') as f: testtif(f.read())
 #    with open("tif/500542_tif_0.tif", 'rb') as f: testtif(f.read())
-    with open("tif/600DQ_421740_tif_1.tif", 'rb') as f: testtif(f.read())
+    with open("tif/33563.tif", 'rb') as f: testtif(f.read())
