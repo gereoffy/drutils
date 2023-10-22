@@ -13,10 +13,13 @@ lsindx.py   - ntfs INDX directory entries parser/lister
 testfiles.py - file content validator/verifier, supports:
   - old msoffice documents (doc/xls/ppt and other OLE2 files)
   - new office documents   (docx/xlsx/pptx and other ZIP-based xml files)
-  - common image formats   (jpg, png, psd)
+  - common image formats   (jpg, png, gif, psd, tif)
   - pdf
+  - SPSS .sav & CAD .dxf files using external libraries (pyreadstat/ezdxf)
 
 
 testjpeg.py - jpeg parser & validator, used by testfiles  
 testpdf.py  - pdf  parser & validator, used by testfiles  
+testgif.py  - gif  parser & validator, used by testfiles  
+testtif.py  - tif  parser & validator, used by testfiles  
 lznt1.py    - ntfs decompress, used by lstree.py (not my code)  
