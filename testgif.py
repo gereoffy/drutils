@@ -3,6 +3,7 @@
 # based on:  https://github.com/deshipu/circuitpython-gif/blob/master/code.py
 
 import struct
+#import traceback
 
 def read_blockstream(f):
     data=b''
@@ -112,11 +113,13 @@ def testgif(f):
         color_bits = ((flags & 0x70) >> 4) + 1
         palette_size = 1 << ((flags & 0x07) + 1)
         print("GIF:",w, h, palette_size, flags, background, aspect) # GIF: 721 721 64 213 0 0
-        if w<0 or w>2048 or h<0 or h>2048: return 10 # bad size
+        if w<0 or w>8192 or h<0 or h>4096: return 10 # bad size  # gif/Auflage_Gasfeder.GIF: GIF image data, version 87a, 4277 x 3024
         if palette_flag: palette = f.read(3*palette_size)
         ok=0
         while True:
-            block_type = f.read(1)[0]
+            block_type = f.read(1)
+            if len(block_type)!=1: break # EOF
+            block_type=block_type[0] # bytes->int
             print("GIF: block 0x%X"%block_type)
             if block_type == 0x3b:
                 break
@@ -134,6 +137,7 @@ def testgif(f):
         return 0 if ok else 1
     except Exception as e:
         print(repr(e))
+#        print("exception while decoding:"+traceback.format_exc())
         return 100
 
 
