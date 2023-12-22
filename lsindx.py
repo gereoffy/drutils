@@ -1,11 +1,16 @@
 #! /usr/local/bin/pypy3
 
+import os
+import pickle
+
 BLKSIZE=4096
 
 filedata={}
+mftpos={}
 dirlist={}
+dirmap={}
 
-def parseindx(data):
+def parseindx(data,fpos=0):
     def getint(i,l): return int.from_bytes(data[i:i+l],byteorder="little",signed=False)
     def getsint(i,l): return int.from_bytes(data[i:i+l],byteorder="little",signed=True)
     # header
@@ -31,6 +36,7 @@ def parseindx(data):
 #            print(i,fix,fix1,fix2)
             if fix==fix1: data=data[:i*512+510]+fix2+data[i*512+512:] # replace fix1 by fix2
             else: print("CRC error!",i*512)
+    else: print("Bad fixup size: %d (for %d sectors)"%(fixl,len(data)//512))
 
     o=24+offs
 #    e=24+eofs
@@ -45,6 +51,7 @@ def parseindx(data):
 #        print("\t",o,s,n,fl,data[o+n+16:o+s].hex())
         if n+16>=0x52:
             parent=getint(o+16,4) # Parent file reference
+            if fpos and not parent in mftpos: mftpos[parent]=fpos ; print("MFT#%d = 0x%X"%(parent,fpos))
             t=getint(o+16+16,8)   # Last modification date and time
             t//=10000000;
             t-=11644473600;
@@ -67,15 +74,20 @@ def parseindx(data):
         o+=s
 
 f=open("/home/mentes-pd16g/raw2.img","rb")
+fpos=0
 while True:
     data=f.read(BLKSIZE)
-    if not data or len(data)<BLKSIZE: break
-    if data[0:4]!=b'INDX': continue
-    parseindx(data)
+    if not data or len(data)<BLKSIZE: break # EOF
+    if data[0:4]==b'INDX': parseindx(data,fpos)
+    fpos+=len(data)
+
+#exit(0)
 
 for k in sorted(dirlist.keys()): print(k,dirlist[k])
 
 def get_path(ref):
+    if ref in dirmap: return dirmap[ref]
+    oref=ref
     x=[]
     while True:
         try:
@@ -86,10 +98,15 @@ def get_path(ref):
         x.append(fn)
         if ref==parent: break # reached root
         ref=parent
-    return "/".join(reversed(x))
+    y="/".join(reversed(x))
+    os.makedirs(y, exist_ok=True)
+    dirmap[oref]=y
+    return y
 
 for k in sorted(filedata.keys()):
     if k<1024: continue
     for fs,fn,t,fref,parent in filedata[k]:
         print(fs,t,"%d/%d"%(fref,parent),'"%s/%s"'%(get_path(parent),fn))
+
+pickle.dump((filedata,dirmap),open("INDEX.pck","wb"))
 
