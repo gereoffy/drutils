@@ -7,9 +7,12 @@ BLKSIZE=4096
 MFTSIZE=1024
 
 filedata={}
-mftpos={}
 dirlist={}
 dirmap={}
+
+# start of INDX entries data, as retrieved from INDX and MFT records:
+mftpos={}
+idxpos={}
 
 
 def parse_MFT(data,fpos=0,debug=False):
@@ -80,7 +83,16 @@ def parse_MFT(data,fpos=0,debug=False):
                 if debug: print("NAME: ",nameoff,namelen,namespc,name,parent,"SIZE:",fs,"TIME:",tt)
                 if namespc<2 or not fnev: fnev=name
         else:
+            size1=getint(o+16+24,8) & 0x0000FFFFFFFFFFFF # Allocated data size (or allocated length).
             fs=getint(o+16+32,8) & 0x0000FFFFFFFFFFFF # Data size (or file size)  0x18 0000 0000 A1EA;
+            # decode first run to get file start position:
+            runso=getint(o+16+16,2) # Contains an offset relative from the start of the MFT attribute
+            rundata=data[o+runso:o+l] #.split(b'\xff\xff\xff\xff')[0]
+            rl=data[o+runso] ; runso+=1
+            r_size=getint(o+runso,rl&15) ; runso+=rl&15
+            r_start=getint(o+runso,rl>>4) ; runso+=rl>>4
+            if debug: print("DATA: start=0x%X size=%d/%d fragmented=%s"%(r_start*BLKSIZE,r_size*BLKSIZE,size1,"Yes" if data[o+runso] else "No"))
+            mftpos[mft]=r_start*BLKSIZE
 
         o+=l
 
@@ -139,7 +151,9 @@ def parseindx(data,fpos=0,debug=False):
 #        print("\t",o,s,n,fl,data[o+n+16:o+s].hex())
         if n+16>=0x52:
             parent=getint(o+16,4) # Parent file reference
-            if fpos and not parent in mftpos: mftpos[parent]=fpos #; print("MFT#%d = 0x%X"%(parent,fpos))
+            if fpos and not parent in idxpos:
+                idxpos[parent]=fpos
+                if parent in mftpos: print("MFT#%d = 0x%X  vs.  0x%X    offs=0x%X"%(parent,fpos,mftpos[parent],fpos-mftpos[parent]))
             t=getint(o+16+16,8)   # Last modification date and time
             t//=10000000;
             t-=11644473600;
