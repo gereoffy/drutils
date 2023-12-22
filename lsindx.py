@@ -6,9 +6,13 @@ import pickle
 BLKSIZE=4096
 MFTSIZE=1024
 
+part_start=0 #0x7000+0xE00 #63*512
+device="/home/mentes-pd16g/raw3x.img"
+
 filedata={}
 dirlist={}
 dirmap={}
+mftfiles={}
 
 # start of INDX entries data, as retrieved from INDX and MFT records:
 mftpos={}
@@ -84,15 +88,26 @@ def parse_MFT(data,fpos=0,debug=False):
                 if namespc<2 or not fnev: fnev=name
         else:
             size1=getint(o+16+24,8) & 0x0000FFFFFFFFFFFF # Allocated data size (or allocated length).
-            fs=getint(o+16+32,8) & 0x0000FFFFFFFFFFFF # Data size (or file size)  0x18 0000 0000 A1EA;
-            # decode first run to get file start position:
+            size2=getint(o+16+32,8) & 0x0000FFFFFFFFFFFF # Data size (or file size)  0x18 0000 0000 A1EA;
+            # decode runs:
             runso=getint(o+16+16,2) # Contains an offset relative from the start of the MFT attribute
+            compr=getint(o+16+18,2) # Contains the compression unit size as 2^(n) number of cluster blocks
             rundata=data[o+runso:o+l] #.split(b'\xff\xff\xff\xff')[0]
-            rl=data[o+runso] ; runso+=1
-            r_size=getint(o+runso,rl&15) ; runso+=rl&15
-            r_start=getint(o+runso,rl>>4) ; runso+=rl>>4
-            if debug: print("DATA: start=0x%X size=%d/%d fragmented=%s"%(r_start*BLKSIZE,r_size*BLKSIZE,size1,"Yes" if data[o+runso] else "No"))
-            mftpos[mft]=r_start*BLKSIZE
+            runs=[]
+            r_cluster=0 ; r_total=0
+            while runso<l:
+                rl=data[o+runso] ; runso+=1
+                if rl==0: break # done
+                r_size=getsint(o+runso,rl&15) ; runso+=rl&15 ; r_total+=r_size
+                r_delta=getsint(o+runso,rl>>4) ; runso+=rl>>4 ; r_cluster+=r_delta
+                runs.append((r_cluster if r_delta else 0, r_size))
+            if t==0x80 and nl==0: # $DATA (file)
+                fs=size2
+                if debug:  print("DATA: start=0x%X size=%d/%d/%d runs=%d compr=0x%X flags=0x%X %s"%(runs[0][0], BLKSIZE*r_total,size1,size2, len(runs), compr, flags, "OK" if BLKSIZE*r_total==size1 else "BAD"), rundata.hex(' '))
+                if fnev and flags==1 and compr==0 and fs and BLKSIZE*r_total==size1 and BLKSIZE*r_total<1024*1024*1024: mftfiles[mft]=(fnev,parent,fs,tt,runs)
+                elif debug: print("DATA: skipping...") # TODO: implement mft reference lookup... (0x20 attr)
+            elif t==0xA0: # $INDEX_ALLOC (dir)
+                mftpos[mft]=BLKSIZE*runs[0][0] # direntry
 
         o+=l
 
@@ -154,6 +169,7 @@ def parseindx(data,fpos=0,debug=False):
             if fpos and not parent in idxpos:
                 idxpos[parent]=fpos
                 if parent in mftpos: print("MFT#%d = 0x%X  vs.  0x%X    offs=0x%X"%(parent,fpos,mftpos[parent],fpos-mftpos[parent]))
+                elif debug: print("MFT#%d = 0x%X  not in MFT"%(parent,fpos))
             t=getint(o+16+16,8)   # Last modification date and time
             t//=10000000;
             t-=11644473600;
@@ -180,7 +196,7 @@ def parseindx(data,fpos=0,debug=False):
 
         o+=s
 
-f=open("/home/mentes-pd16g/raw2.img","rb")
+f=open(device,"r+b")
 
 # find FILE (MFT) entries:
 #fpos=0xC0000000 ; f.seek(fpos)
@@ -228,3 +244,23 @@ for k in sorted(filedata.keys()):
 
 pickle.dump((filedata,dirmap),open("INDEX.pck","wb"))
 
+# restore files:
+for mft in mftfiles:
+    fnev,parent,fs,tt,runs = mftfiles[mft]
+    fn=get_path(parent)+"/"+fnev
+    print("COPY %d bytes to %s  (%d runs)"%(fs,fn,len(runs)))
+    with open(fn,"wb") as fo:
+        for ro,rl in runs:
+            f.seek(part_start+BLKSIZE*ro)
+            fo.write(f.read(BLKSIZE*rl))
+        fo.truncate(fs)
+    if tt: os.utime(fn, (tt,tt))
+
+# delete files:
+for mft in mftfiles:
+    fnev,parent,fs,tt,runs = mftfiles[mft]
+    fn=get_path(parent)+"/"+fnev
+    print("DELETE %d bytes of %s  (%d runs)"%(fs,fn,len(runs)))
+    for ro,rl in runs:
+        f.seek(part_start+BLKSIZE*ro)
+        f.write(bytes(BLKSIZE*rl))
