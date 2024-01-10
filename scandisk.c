@@ -41,7 +41,8 @@ void analyze(unsigned char* data,int len,long long fpos){
         printf("%012llX: %.7s\n",fpos,data+1);  // PDF  # 25 50 44 46 │ 2D 31 2E 37  
     } else
     if( (magic&0xF0FFFFFF)==0xE0FFD8FF){   // FF D8 FF Ex
-        printf("%012llX: JPEG %02X:%.64s\n",fpos,data[3],data+6);
+        int l=0; while(data[6+l]>=32 && data[6+l]<127) l++; // find ascii string len
+        printf("%012llX: JPEG %02X:%.*s\n",fpos,data[3],l,data+6);
     } else
     if( magic2==0x70797466 && (magic&0xFFFFFF)==0 && data[3]>=16 ){   // 66 74 79 70
         printf("%012llX: MOV:%.4s %d\n",fpos,data+8, data[3] );
@@ -55,7 +56,7 @@ void analyze(unsigned char* data,int len,long long fpos){
 unsigned char buffer[BUFFSIZE];
 
 int main(){
-  FILE* f=fopen("/home/mentes-pd16g/raw3.img","rb");
+  FILE* f=fopen("/dev/nvme1n1p3","rb");
   long long fpos=0;
   while(fread(buffer,BUFFSIZE,1,f)==1) for(int bpos=0;bpos<BUFFSIZE;bpos+=512){
     analyze(buffer+bpos,512,fpos);
