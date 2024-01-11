@@ -67,6 +67,16 @@ int analyze(unsigned char* data,int len,long long fpos){
         printf("%012llX: PNG %dx%dx%d\n",fpos, 256*data[16+2]+data[16+3], 256*data[20+2]+data[20+3],data[24]);
         return 2;
     }
+    //------------------ PSD ----------------------
+    if(magic==0x53504238 && magic2==0x100){ // 8BPS   00 01 00 00
+    // 0:  38 42 50 53 │ 00 01 00 00 │ 00 00 00 00 
+    //12:  00 03
+    //14:  00 00 25 0F
+    //18:  00 00 34 2C
+    //22:  00 08 
+        printf("%012llX: PSD %dx%dx%d %dbpp\n",fpos, 256*data[20]+data[21], 256*data[16]+data[17],data[13],data[23]);
+        return !data[12] && data[13] && !data[22] && (data[23]==1 || data[23]==8 || data[23]==16 || data[23]==32) ? 2 : 0; // bpp=1|8|16|32
+    }
     //------------------ JPG ----------------------
     if( (magic&0xF0FFFFFF)==0xE0FFD8FF){   // FF D8 FF Ex
         int l=0; while(data[6+l]>=32 && data[6+l]<127) l++; // find ascii string len
