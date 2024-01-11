@@ -85,9 +85,12 @@ int analyze(unsigned char* data,int len,long long fpos){
         return !memcmp(data+6,"JFIF",4) || !memcmp(data+6,"Exif",4) || !memcmp(data+6,"http",4) || !memcmp(data+6,"ICC_PROFILE",10) ? 2 : 0;
     }
     //---------------- MPV/MP4 --------------------
-    if( magic2==0x70797466 && (magic&0xFFFFFF)==0 && data[3]>=16 ){   // 66 74 79 70
-        printf("%012llX: MOV:%.4s %d\n",fpos,data+8, data[3] );
+    if( magic2==0x70797466 && (magic&0xFFFFFF)==0 && data[3]>=16 ){   // 66 74 79 70  "ftyp"
+        // First chunk must be of type "ftype" and has a sub-type at offset 8. MOV defined by sub-type which must be "qt ".
+        int next=data[3]; if(!memcmp(data+next+4,"free",4) && !data[next] && !data[next+1] && !data[next+2]) next+=data[next+3]; // skip "free" chunk (WTF???)
+        printf("%012llX: MOV:%.4s %.4s %d\n",fpos,data+8,data+next+4, next);
         return 2;
+//        return !memcmp(data+next+4,"mdat",4) || !memcmp(data+next+4,"moov",4) ? 2 : 0;
     }
 //    else printf("%12llX: %08X %08X %d\n",fpos,magic,magic2,12345);
     return 0;
