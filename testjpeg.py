@@ -6,11 +6,11 @@ import re
 import sys
 import time
 
-def GetArray(type, l, length):
-    """
-    A convenience function for unpacking an array from bitstream
-    """
-    return list(unpack(type * length, l[:length]))
+# DC alapu elonezet stderr-re (a DC dekodolas ellenorzesehez):
+#   None        - nincs
+#   "truecolor" - 24 bites szinek (iTerm2 stb.)
+#   "16"        - 16 szinu ANSI, szabvany terminalokhoz
+ASCII_ART = None
 
 
 marker_mapping = {
@@ -64,9 +64,104 @@ marker_mapping = {
 }
 
 
+###############################################################################################################################
+# ascii-art (DC elonezet)
+###############################################################################################################################
+
+def ColorConversion(dc):
+    Y=128+dc[0]/8
+    if len(dc)<3: # greyscale?
+        Y=max(min(Y,255),0)
+        return Y,Y,Y
+    R = Y + 1.402/8 * (dc[2])
+    G = Y - 0.34414/8 * (dc[1]) - 0.71414/8 * (dc[2])
+    B = Y + 1.772/8 * (dc[1])
+    return max(min(R,255),0), max(min(G,255),0), max(min(B,255),0)
+
+def print_aa(dcline,prevdcline):
+    s=u""
+    if not prevdcline: prevdcline=dcline
+    for dc1,dc2 in zip(prevdcline,dcline):
+        s+="\x1b[48;2;%d;%d;%dm"%ColorConversion(dc1)
+        s+="\x1b[38;2;%d;%d;%dm▄"%ColorConversion(dc2)
+    #print(s,'\x1b[0m')
+    sys.stderr.write(s+'\x1b[0m\n')
+    return
+
+palette16=[
+    (0,0,0), # 0
+    (212,26,26), # 1
+    (34,211,39), # 2
+    (211,211,48), # 3
+    (28,15,210), # 4
+    (214,32,211), # 5
+    (46,212,213), # 6
+    (201,201,201), # 7
+    # bright:
+    (146,146,146), # 0
+    (250,32,32), # 1
+    (43,252,48), # 2
+    (253,254,60), # 3
+    (36,20,250), # 4
+    (252,40,252), # 5
+    (57,253,253), # 6
+    (216,216,216) # 7
+]
+
+def rgb16dither(rgb):
+    bests=[]
+    for x in range(16):
+        c=palette16[x]
+        def dif(i): return (c[i]-rgb[i])*(c[i]-rgb[i])
+        d=dif(0)+dif(1)+dif(2)
+        bests.append((d,x))
+    bests.sort() # TODO: optimize!
+    bg=bests[0][1] # best color
+    fg=bests[1][1] # 2nd best
+    c1=palette16[bg]
+    c2=palette16[fg]
+    besti,bestd=-1,0
+    for i in range(5):
+#        f=[0,0.25,0.5,0.75,1][i]
+        f=[0,0.2,0.4,0.7,1][i]
+        def dif(i):
+            c=c1[i]+(c2[i]-c1[i])*f
+            return (c-rgb[i])*(c-rgb[i])
+        d=dif(0)+dif(1)+dif(2)
+        if besti<0 or d<bestd: besti,bestd=i,d
+    return "\x1b[%dm\x1b[%dm%s"%( 40+bg if bg<8 else 100+bg-8, 30+fg if fg<8 else 90+fg-8, " ░▒▓█"[besti])
+
+
+def rgb16(rgb):
+    best,bestd=-1,0
+    for x in range(16):
+        c=palette16[x]
+        def dif(i): return (c[i]-rgb[i])*(c[i]-rgb[i])
+        d=dif(0)+dif(1)+dif(2)
+        if best<0 or d<bestd: best,bestd=x,d
+    return best if best<8 else 60+(best-8)
+
+def print_aa16(dcline,prevdcline,dither=True):
+    s=u""
+    if not prevdcline: prevdcline=dcline
+    for dc1,dc2 in zip(prevdcline,dcline):
+        if dither: s+=rgb16dither(ColorConversion(dc1)) ; continue
+        s+="\x1b[%dm"%(40+rgb16(ColorConversion(dc1)))
+        s+="\x1b[%dm▄"%(30+rgb16(ColorConversion(dc2)))
+    #print(s,'\x1b[0m')
+    sys.stderr.write(s+'\x1b[0m\n')
+    return
+
+aa_functions = {"truecolor": print_aa, "16": print_aa16}
+
+
+###############################################################################################################################
+# huffman
+###############################################################################################################################
+
 # a scan (entropy coded segment) vege: FF utan nem 00 (escape), nem RST (D0-D7) es nem D8 (ezt korabban is atengedtuk)
 # az FF+ a marker elotti opcionalis FF fill byte-okat is lenyeli
-scan_end_re = re.compile(b'\xff+[^\x00\xd0-\xd8\xff]', re.S)
+scan_end_re = re.compile(b'\xff+[^\x00\xd0-\xd8\xff]')
 rst_split_re = re.compile(b'\xff+([\xd0-\xd7])')
 
 # ennyi 0 byte kerul a scan adat vegere, hogy a bitolvasonak ne kelljen a buffer veget figyelnie.
@@ -109,9 +204,10 @@ def build_huffman_luts(lengths, values):
 # entropy dekodolok. Mindegyik (dekodolt_mcu_szam, hibauzenet_vagy_None) -t ad vissza.
 # buf: a scan destuffolt (FF00->FF) adata RST markerek nelkul + SCAN_PAD, segs: [(start,end)] byte offsetek RST szegmensenkent
 # A bitolvaso: acc-ban nbits db ervenyes bit van (a felso bitek szemetek lehetnek), 32 bit ala esve 32 bittel toltjuk.
+# log: debug kiiras (nem szamolt figyelmeztetesek)
 ###############################################################################################################################
 
-def decode_sequential(buf, segs, rst, mcu_max, blocks, ncomp, Se, disp):
+def decode_sequential(buf, segs, rst, mcu_max, blocks, ncomp, Se, disp, log):
     """ baseline/extended DC+AC es progressive DC first pass (Se=0) """
     mcu = 0
     kend = Se + 1
@@ -167,7 +263,7 @@ def decode_sequential(buf, segs, rst, mcu_max, blocks, ncomp, Se, disp):
                     row = []
                     x = 0
         left = send * 8 - (pos * 8 - nbits)
-        if left >= 8: print("WARNING: %d extra bytes at end of scan segment (MCU #%d)" % (left // 8, mcu))
+        if left >= 8: log("WARNING: %d extra bytes at end of scan segment (MCU #%d)" % (left // 8, mcu))
         if mcu >= mcu_max: break
     return mcu, None
 
@@ -185,7 +281,7 @@ def decode_dc_refine(buf, segs, rst, mcu_max, nblocks):
     return mcu, None
 
 
-def decode_ac_first(buf, segs, rst, bmax, raw, Ss, Se, mask):
+def decode_ac_first(buf, segs, rst, bmax, raw, Ss, Se, mask, log):
     """ progressive AC first pass (non-interleaved, 1 komponens). mask[blokk]: nem-nulla koefficiensek bitmaszkja (bit k-1) """
     b = 0
     for (sstart, send) in segs:
@@ -234,14 +330,14 @@ def decode_ac_first(buf, segs, rst, bmax, raw, Ss, Se, mask):
             mask[b] = m
             b += 1
             if pos * 8 - nbits > endbits: return b, "unexpected end of scan data"
-        if eobrun: print("WARNING: EOBRUN %d crosses restart marker / end of scan" % eobrun)
+        if eobrun: log("WARNING: EOBRUN %d crosses restart marker / end of scan" % eobrun)
         left = send * 8 - (pos * 8 - nbits)
-        if left >= 8: print("WARNING: %d extra bytes at end of scan segment (block #%d)" % (left // 8, b))
+        if left >= 8: log("WARNING: %d extra bytes at end of scan segment (block #%d)" % (left // 8, b))
         if b >= bmax: break
     return b, None
 
 
-def decode_ac_refine(buf, segs, rst, bmax, raw, Ss, Se, mask):
+def decode_ac_refine(buf, segs, rst, bmax, raw, Ss, Se, mask, log):
     """ progressive AC refinement pass (libjpeg decode_mcu_AC_refine alapjan) """
     b = 0
     for (sstart, send) in segs:
@@ -310,9 +406,9 @@ def decode_ac_refine(buf, segs, rst, bmax, raw, Ss, Se, mask):
             mask[b] = m
             b += 1
             if pos * 8 - nbits > endbits: return b, "unexpected end of scan data"
-        if eobrun: print("WARNING: EOBRUN %d crosses restart marker / end of scan" % eobrun)
+        if eobrun: log("WARNING: EOBRUN %d crosses restart marker / end of scan" % eobrun)
         left = send * 8 - (pos * 8 - nbits)
-        if left >= 8: print("WARNING: %d extra bytes at end of scan segment (block #%d)" % (left // 8, b))
+        if left >= 8: log("WARNING: %d extra bytes at end of scan segment (block #%d)" % (left // 8, b))
         if b >= bmax: break
     return b, None
 
@@ -320,15 +416,20 @@ def decode_ac_refine(buf, segs, rst, bmax, raw, Ss, Se, mask):
 ###############################################################################################################################
 
 
-def testjpeg(d):
-#    l=len(d)
-    print("JPEG file size: %d"%(len(d)))
+def testjpeg(d,debug=False):
+    """ visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent. """
+
+    def log(*args,**kw):
+        if debug: print(*args,**kw)
+
+    log("JPEG file size: %d"%(len(d)))
 
     huffman_ac_tables= [None, None, None, None]   # (raw_lut, ac_lut)
     huffman_dc_tables= [None, None, None, None]
     quant={}
     component= {}
     acmask= {}   # progressive: komponensenkent a blokkok nem-nulla AC koefficiens bitmaszkja
+    scan_no=0
 
     def DefineQuantizationTables(data):
         l=0
@@ -350,12 +451,12 @@ def testjpeg(d):
         Th= header & 0x0F
         Tc= (header >> 4) & 0x0F
 
-        lengths = GetArray("B", data[offset : offset + 16], 16)
+        lengths = list(data[offset : offset + 16])
         offset += 16
-        print(Th,Tc,lengths)
+        log(Th,Tc,lengths)
         total = sum(lengths)
         if Th>3 or Tc>1 or total>256 or offset+total>len(data):
-            print("ERROR! bad huffman table header")
+            print("ERROR! bad huffman table header (Th=%d Tc=%d)"%(Th,Tc))
             return -offset
         huffval = data[offset:offset+total]
         offset += total
@@ -373,97 +474,14 @@ def testjpeg(d):
       return offset
 
 
-    def ColorConversion(dc):
-        Y=128+dc[0]/8
-        if len(dc)<3: # greyscale?
-            Y=max(min(Y,255),0)
-            return Y,Y,Y
-        R = Y + 1.402/8 * (dc[2])
-        G = Y - 0.34414/8 * (dc[1]) - 0.71414/8 * (dc[2])
-        B = Y + 1.772/8 * (dc[1])
-        return max(min(R,255),0), max(min(G,255),0), max(min(B,255),0)
-
-    def print_aa(dcline,prevdcline):
-        s=u""
-        if not prevdcline: prevdcline=dcline
-        for dc1,dc2 in zip(prevdcline,dcline):
-            s+="\x1b[48;2;%d;%d;%dm"%ColorConversion(dc1)
-            s+="\x1b[38;2;%d;%d;%dm▄"%ColorConversion(dc2)
-        #print(s,'\x1b[0m')
-        sys.stderr.write(s+'\x1b[0m\n')
-        return
-
-    palette16=[
-        (0,0,0), # 0
-        (212,26,26), # 1
-        (34,211,39), # 2
-        (211,211,48), # 3
-        (28,15,210), # 4
-        (214,32,211), # 5
-        (46,212,213), # 6
-        (201,201,201), # 7
-        # bright:
-        (146,146,146), # 0
-        (250,32,32), # 1
-        (43,252,48), # 2
-        (253,254,60), # 3
-        (36,20,250), # 4
-        (252,40,252), # 5
-        (57,253,253), # 6
-        (216,216,216) # 7
-    ]
-
-    def rgb16dither(rgb):
-        bests=[]
-        for x in range(16):
-            c=palette16[x]
-            def dif(i): return (c[i]-rgb[i])*(c[i]-rgb[i])
-            d=dif(0)+dif(1)+dif(2)
-            bests.append((d,x))
-        bests.sort() # TODO: optimize!
-        bg=bests[0][1] # best color
-        fg=bests[1][1] # 2nd best
-        c1=palette16[bg]
-        c2=palette16[fg]
-        besti,bestd=-1,0
-        for i in range(5):
-#            f=[0,0.25,0.5,0.75,1][i]
-            f=[0,0.2,0.4,0.7,1][i]
-            def dif(i):
-                c=c1[i]+(c2[i]-c1[i])*f
-                return (c-rgb[i])*(c-rgb[i])
-            d=dif(0)+dif(1)+dif(2)
-            if besti<0 or d<bestd: besti,bestd=i,d
-        return "\x1b[%dm\x1b[%dm%s"%( 40+bg if bg<8 else 100+bg-8, 30+fg if fg<8 else 90+fg-8, " ░▒▓█"[besti])
-
-
-    def rgb16(rgb):
-        best,bestd=-1,0
-        for x in range(16):
-            c=palette16[x]
-            def dif(i): return (c[i]-rgb[i])*(c[i]-rgb[i])
-            d=dif(0)+dif(1)+dif(2)
-            if best<0 or d<bestd: best,bestd=x,d
-        return best if best<8 else 60+(best-8)
-
-    def print_aa16(dcline,prevdcline,dither=True):
-        s=u""
-        if not prevdcline: prevdcline=dcline
-        for dc1,dc2 in zip(prevdcline,dcline):
-            if dither: s+=rgb16dither(ColorConversion(dc1)) ; continue
-            s+="\x1b[%dm"%(40+rgb16(ColorConversion(dc1)))
-            s+="\x1b[%dm▄"%(30+rgb16(ColorConversion(dc2)))
-        #print(s,'\x1b[0m')
-        sys.stderr.write(s+'\x1b[0m\n')
-        return
-
-
     def StartOfScan(data,rst):
         """ visszaad: (a scan utani marker pozicioja vagy -1, hibapont) """
+        nonlocal scan_no
+        scan_no+=1
         hdrlen = data[3]+(data[2]<<8)+2
         Ns=data[4]
         if Ns<1 or Ns>4 or hdrlen!=6+2*Ns+2 or len(data)<hdrlen:
-            print("ERROR! bad SOS header")
+            print("ERROR! bad SOS header (scan #%d)"%(scan_no))
             return -1,10
         if "dimensions" not in component:
             print("ERROR! SOS before SOF")
@@ -474,7 +492,7 @@ def testjpeg(d):
           # Read the scan component selector
           Cs= data[p]
           if Cs not in component:
-              print("ERROR! SOS refers to unknown component 0x%02X"%(Cs))
+              print("ERROR! SOS refers to unknown component 0x%02X (scan #%d)"%(Cs,scan_no))
               return -1,10
           cids.append(Cs)
           # Read the huffman table selectors
@@ -494,7 +512,8 @@ def testjpeg(d):
         p+=3
         # Ns:3 Ss:0 Se:63 A:00 baseline
         # Ns:3 Ss:0 Se:0 A:00  progressive
-        print( "Ns:%d Ss:%d Se:%d A:%02X C:%d Huff: DC=%d/AC=%d --------------------------------------------------------------------------------------------" % (Ns, Ss, Se, A, Cs, Td, Ta) )
+        scaninfo="scan #%d Ns:%d Ss:%d Se:%d A:%02X C:%d Huff: DC=%d/AC=%d" % (scan_no, Ns, Ss, Se, A, Cs, Td, Ta)
+        log(scaninfo, "-"*80)
 
         t0=time.time()
         dims=component["dimensions"]
@@ -510,16 +529,15 @@ def testjpeg(d):
         parts=rst_split_re.split(region)
         segdata=parts[0::2]
         rstmarkers=parts[1::2]
-        cnt0=region.count(b'\xff\x00')
         errs=0
-        if region.find(b'\xff\xd8')>=0: print("WARNING: FFD8 inside scan data")
+        if region.find(b'\xff\xd8')>=0: log("WARNING: FFD8 inside scan data")
         for i,mk in enumerate(rstmarkers):
             if mk[0]!=0xD0+(i&7):
-                print("ERROR! bad restart marker sequence: FF%02X instead of FF%02X (#%d)"%(mk[0],0xD0+(i&7),i))
+                print("ERROR! bad restart marker sequence: FF%02X instead of FF%02X (#%d) in %s"%(mk[0],0xD0+(i&7),i,scaninfo))
                 errs+=10
                 break
         if rstmarkers and not rst:
-            print("ERROR! %d restart markers without restart interval"%(len(rstmarkers)))
+            print("ERROR! %d restart markers without restart interval in %s"%(len(rstmarkers),scaninfo))
             errs+=10
             segdata=[b''.join(segdata)]
         bufparts=[]
@@ -555,14 +573,14 @@ def testjpeg(d):
                 mask=acmask.get(Cs)
                 if mask is None or len(mask)!=mcu_max:
                     mask=acmask[Cs]=[0]*mcu_max
-                if Ah==0: mcu_cnt,err=decode_ac_first(buf,segs,rst,mcu_max,huffman_ac_tables[Ta][0],Ss,Se,mask)
-                else:     mcu_cnt,err=decode_ac_refine(buf,segs,rst,mcu_max,huffman_ac_tables[Ta][0],Ss,Se,mask)
+                if Ah==0: mcu_cnt,err=decode_ac_first(buf,segs,rst,mcu_max,huffman_ac_tables[Ta][0],Ss,Se,mask,log)
+                else:     mcu_cnt,err=decode_ac_refine(buf,segs,rst,mcu_max,huffman_ac_tables[Ta][0],Ss,Se,mask,log)
           elif Ah!=0: # progressive DC refining bits (1 bit/blokk)
             nblocks=sum(component[C]['H']*component[C]['V'] for C in cids) if Ns>1 else 1
             mcu_cnt,err=decode_dc_refine(buf,segs,rst,mcu_max,nblocks)
           else:
             if dims['progressive'] and Se!=0: err="bad DC scan parameters"
-            elif not dims['progressive'] and (Se!=63 or A!=0): print("WARNING: sequential scan with Ss=%d Se=%d A=%02X"%(Ss,Se,A))
+            elif not dims['progressive'] and (Se!=63 or A!=0): log("WARNING: sequential scan with Ss=%d Se=%d A=%02X"%(Ss,Se,A))
             blocks=[]
             for i,C in enumerate(cids):
                 comp=component[C]
@@ -575,12 +593,13 @@ def testjpeg(d):
             if not err:
                 ########################################################
                 disp=(mcuw,1,0,None)
-                if Cs==component["IDs"][0] or Ns>1:   # ascii-art csak ha a luma is benne van
+                aa=aa_functions.get(ASCII_ART)
+                if aa and (Cs==component["IDs"][0] or Ns>1):   # ascii-art csak ha a luma is benne van
                     mcuws=max(int(mcuw/160),1)
                     if mcuw/mcuws>200: mcuws+=1
                     c0=component[component["IDs"][0]]
                     mcuhs=max((mcuws*2*c0['H'])//c0['V'],1)
-                    print("ASCII scaling",mcuws,mcuhs,mcuw//mcuws,mcuh//mcuhs)
+                    log("ASCII scaling",mcuws,mcuhs,mcuw//mcuws,mcuh//mcuhs)
                     qs=[quant.get(component[C]['Tq'],[1])[0]<<Al for C in cids]
                     dcy=0
                     prevdc=None
@@ -589,30 +608,36 @@ def testjpeg(d):
                         if dcy%mcuhs==0 or dcy%mcuhs==(mcuhs//2):
                             dc=[[v*qq for v,qq in zip(r,qs)] for r in row]
                             if dcy%mcuhs==0: prevdc=dc
-                            if dcy%mcuhs==(mcuhs//2): print_aa(dc,prevdc)
+                            if dcy%mcuhs==(mcuhs//2): aa(dc,prevdc)
                         dcy+=1
                     disp=(mcuw,mcuws,mcuws*160,row_cb)
                 ########################################################
-                mcu_cnt,err=decode_sequential(buf,segs,rst,mcu_max,blocks,Ns,Se,disp)
+                mcu_cnt,err=decode_sequential(buf,segs,rst,mcu_max,blocks,Ns,Se,disp,log)
         except IndexError:
             err="scan data overrun"
 
         t0=time.time()-t0
-        print("%6d/%6d MCU%s blocks read!  %d bytes  time: %5d ms   (%d kB/s)"%(mcu_cnt,mcu_max,"!!!" if mcu_cnt!=mcu_max else "",len(region),int(t0*1000.0),int(len(region)/1024/max(t0,1e-6))))
+        log("%6d/%6d MCU%s blocks read!  %d bytes  time: %5d ms   (%d kB/s)"%(mcu_cnt,mcu_max,"!!!" if mcu_cnt!=mcu_max else "",len(region),int(t0*1000.0),int(len(region)/1024/max(t0,1e-6))))
         if err:
-            print("ERROR! scan decoding failed at MCU #%d: %s"%(mcu_cnt,err))
+            print("ERROR! decoding failed at MCU #%d/%d: %s  (%s)"%(mcu_cnt,mcu_max,err,scaninfo))
             errs+=10
         elif mcu_cnt!=mcu_max:
+            print("ERROR! only %d of %d MCUs decoded  (%s)"%(mcu_cnt,mcu_max,scaninfo))
             errs+=10
+
+        # nullaval feltoltott (kinullazott) teruletek a scan adatban:
+        r=data.find(bytes(512),hdrlen,q if q>=0 else len(data))
+        if r>=0:
+            print("ERROR! 512+ x 0x00 bytes repeating at %d  (%s)"%(r,scaninfo))
+            errs+=10
+        if debug:
+            r=data.find(b'\xff'*4,hdrlen,q if q>=0 else len(data))
+            if r>=0: print("WARNING: 4 x 0xFF bytes repeating at %d"%(r))
 
         #######
         if q<0: return -1,errs
-        print("%d reset markers && %d escapes in %d bytes image data skipped"%(len(rstmarkers),cnt0,q))
-        sys.stdout.flush()
-        for s in [bytearray(512), bytearray([0xFF] * 4)]:
-            r=data.find(s,hdrlen,q)
-            if r>=0: print("WARNING: %d x 0x%02X bytes repeating at %d"%(len(s),s[0],r))
-        print("MarkerAfterScan: FF%02X"%(data[q+1]))
+        log("%d reset markers && %d escapes in %d bytes image data skipped"%(len(rstmarkers),region.count(b'\xff\x00') if debug else 0,q))
+        log("MarkerAfterScan: FF%02X"%(data[q+1]))
         return q,errs
 
 
@@ -625,17 +650,17 @@ def testjpeg(d):
         else: return -1
         offs,=unpack(e+"L",data[4:8])
         cnt,=unpack(e+"H",data[offs:offs+2])
-        print(endian,offs,cnt)
+        log(endian,offs,cnt)
         icnt=isize=ioffs=0
         for i in range(cnt):
             tag,typ,count,value=unpack(e+"HHLL",data[offs+2+i*12:offs+2+i*12+12])
             if tag==0xB001: icnt=value          # NumberOfImages
             elif tag==0xB002: isize,ioffs=count,value   # MPEntry
-        print(icnt,isize,ioffs)
+        log(icnt,isize,ioffs)
         if isize:
             for i in range(isize//16):
                 attr,size,offs,dep1,dep2=unpack(e+"LLLHH",data[ioffs+i*16:ioffs+i*16+16])
-                print("Individual image #%d: 0x%X  (%d bytes)"%(i,offs,size))
+                log("Individual image #%d: 0x%X  (%d bytes)"%(i,offs,size))
 
       except Exception:
         return -1
@@ -645,24 +670,24 @@ def testjpeg(d):
     data=d
     errcnt=0
     rst=0
-    mpext=False
     markcnt={0xFFD8:0,0xFFD9:0,0xFFDA:0,0xFFC0:0,0xFFC1:0,0xFFC2:0}
     while len(data)>1:
         if data[0]!=0xFF:
             p=data.find(0xFF)
             if p<=0: p=len(data)
-            print("ERROR! skipping %d bytes"%(p))
+            print("ERROR! skipping %d bytes at %d"%(p,len(d)-len(data)))
             errcnt+=5
             data=data[p:]
             # erdemes egyaltalan folytatni? ez mar innen szar szokott lenni...
             continue
 
         marker = data[1]|(data[0]<<8)
-        if marker not in [0xffd8,0xffd9] and len(data)>=4:
-            lenchunk = data[3]+(data[2]<<8)+2
-            print("0x%04X (%d) %s"%(marker,lenchunk,marker_mapping.get(marker)))
-        else:
-            print("0x%04X %s"%(marker,marker_mapping.get(marker)))
+        if debug:
+            if marker not in [0xffd8,0xffd9] and len(data)>=4:
+                lenchunk = data[3]+(data[2]<<8)+2
+                print("0x%04X (%d) %s"%(marker,lenchunk,marker_mapping.get(marker)))
+            else:
+                print("0x%04X %s"%(marker,marker_mapping.get(marker)))
         markcnt[marker]=markcnt.get(marker,0)+1
 
         if marker == 0xffd8:
@@ -670,9 +695,9 @@ def testjpeg(d):
             continue
 
         if marker == 0xffd9:
-            print(markcnt)
+            log(markcnt)
             if markcnt[0xFFD8]!=1 or markcnt[0xFFD9]!=1 or markcnt[0xFFDA]<1 or markcnt[0xFFC0]+markcnt[0xFFC1]+markcnt[0xFFC2]!=1:
-                print("Bad marker count!")
+                print("ERROR! bad marker count:",", ".join("%04X:%d"%(k,v) for k,v in markcnt.items()))
                 errcnt+=10
 
             p=2
@@ -680,18 +705,20 @@ def testjpeg(d):
             while p<len(data):
                 if data[p]!=0: break
                 p+=1
-            if p>2+3: print("%d zero bytes skipped"%(p-2))
+            if p>2+3: log("%d zero bytes skipped"%(p-2))
             data=data[p:]
 
             # check for extra jpeg thumbnail/preview:
             p=data[:32].find(b'\xff\xd8')
             if p>=0 and len(data)>p+8:
-                print("WARNING: %d bytes extra image !!!\n"%(len(data)))
-                errcnt+=testjpeg(data[p:])
+                log("WARNING: %d bytes extra image !!!\n"%(len(data)))
+                e=testjpeg(data[p:],debug)
+                if e: print("ERROR! ^^^ in extra image at %d (%d bytes)"%(len(d)-len(data)+p,len(data)-p))
+                errcnt+=e
             elif data.startswith(b'\x01\n\x0e\x00\x00\x00Image_UTC_Data'):
-                print("Skipping %d bytes Image_UTC_Data"%(len(data)))
+                log("Skipping %d bytes Image_UTC_Data"%(len(data)))
             else:
-                if len(data)>=4:
+                if len(data)>=4 and debug:
                     print("WARNING: %d bytes left:  %02X %02X %02X %02X"%(len(data),data[0],data[1],data[2],data[3]))
                     print(data[:128].hex(' '))
                     print(data[:128])
@@ -713,7 +740,7 @@ def testjpeg(d):
         else:
             lenchunk = data[3]+(data[2]<<8)+2
             if lenchunk<4 or lenchunk>len(data):
-                print("ERROR! bad segment length %d"%(lenchunk))
+                print("ERROR! bad segment length %d for marker 0x%04X"%(lenchunk,marker))
                 errcnt+=10
                 break
             if marker==0xffc4:   # huffman table
@@ -726,7 +753,9 @@ def testjpeg(d):
                     # ez jo: WARNING! dimensions: 1016 x 1002 x 4 / 8bit , ez is: WARNING! dimensions: 1252 x 1075 x 4 / 8bit
                     # ez is: WARNING! dimensions: 14032 x 9922 x 3 / 8bit
                     # WARNING! dimensions: 1970 x 8120 x 3 / 8bit
-                print("dimensions: %d x %d x %d / %dbit"%(width,height,components,bits))
+                    print("dimensions: %d x %d x %d / %dbit"%(width,height,components,bits))
+                else:
+                    log("dimensions: %d x %d x %d / %dbit"%(width,height,components,bits))
                 if width==0 or height==0 or components==0 or lenchunk<10+components*3:
                     print("ERROR! bad frame header")
                     errcnt+=10
@@ -746,9 +775,9 @@ def testjpeg(d):
                     if H>Hmax: Hmax=H
                     if V>Vmax: Vmax=V
                     Tq=data[10+i*3+2]
-                    print("  component #%d: id=0x%02X sampling=%dx%d quant=0x%X"%(i,C,H,V,Tq))
+                    log("  component #%d: id=0x%02X sampling=%dx%d quant=0x%X"%(i,C,H,V,Tq))
                     if H<1 or H>4 or V<1 or V>4:
-                        print("ERROR! bad sampling factor")
+                        print("ERROR! bad sampling factor %dx%d"%(H,V))
                         errcnt+=10
                         return errcnt
                     component["IDs"].append(C)
@@ -763,27 +792,26 @@ def testjpeg(d):
                 component["dimensions"]['Vmax']=Vmax
                 component["dimensions"]['MW']=((width+Hmax*8-1)//(Hmax*8))
                 component["dimensions"]['MH']=((height+Vmax*8-1)//(Vmax*8))
-                print(component["dimensions"])
+                log(component["dimensions"])
             elif marker==0xffdb: # quant tables
                 hl=DefineQuantizationTables(data[4:lenchunk])
             elif marker==0xffe2: # MP
-                print("APP2 extension: ",data[4:8])
+                log("APP2 extension: ",data[4:8])
                 if data[4:8]==b'MPF\x00':
                     hl=DecodeMPExt(data[8:lenchunk])
                     if hl>=0: hl+=4
-                    mpext=True
                 else: hl=lenchunk-4
             elif marker==0xffdd: # reset interval
                 rst = data[5]+(data[4]<<8)
-                print("RESET interval =",rst)
+                log("RESET interval =",rst)
                 hl=2
             else:
                 hl=lenchunk-4 # unknown type
             if hl<0:
-                print("ERROR! cannot parse %d bytes"%(lenchunk-4+hl))
+                print("ERROR! cannot parse %d bytes of marker 0x%04X"%(lenchunk-4+hl,marker))
                 errcnt+=10
             elif hl!=lenchunk-4:
-                print("ERROR! only %d of %d bytes parsed"%(hl,lenchunk-4))
+                print("ERROR! only %d of %d bytes parsed of marker 0x%04X"%(hl,lenchunk-4,marker))
                 errcnt+=10
             data = data[lenchunk:]
 
@@ -795,12 +823,13 @@ def testjpeg(d):
 #f=open("/home/spamwall/backup/ext/jpg/fec98baf1e9f4697_17229344__BCR-114C-38.jpg","rb")
 
 if __name__ == "__main__":
-  path=sys.argv[1] if len(sys.argv)>1 else "data/"
+  args=sys.argv[1:]
+  path=args[0] if args else "data/"
   if os.path.isdir(path):
     files=[os.path.join(path,n) for n in os.listdir(path)]
   else:
-    files=sys.argv[1:]
+    files=args
   for n in files:
     print("\n\n==================== %s ======================\n"%(os.path.basename(n)))
-    with open(n,"rb") as f: res=testjpeg(f.read())
+    with open(n,"rb") as f: res=testjpeg(f.read(),debug=True)
     if res>0: print("!!!HIBAS!!!",res)
