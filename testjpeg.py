@@ -9,8 +9,10 @@ import time
 # DC alapu elonezet stderr-re (a DC dekodolas ellenorzesehez):
 #   None        - nincs
 #   "truecolor" - 24 bites szinek (iTerm2 stb.)
-#   "16"        - 16 szinu ANSI, szabvany terminalokhoz
-ASCII_ART = None
+#   "256"       - xterm-256 szin (ssh-n at is szinte mindenhol mukodik)
+#   "16x2"      - 16 szinu ANSI, 2 felblokkbol, szabvany terminalokhoz
+#   "16"        - 16 szinu ANSI, "░▒▓" keverek, szabvany terminalokhoz
+ASCII_ART = "256"
 
 
 marker_mapping = {
@@ -78,15 +80,14 @@ def ColorConversion(dc):
     B = Y + 1.772/8 * (dc[1])
     return max(min(R,255),0), max(min(G,255),0), max(min(B,255),0)
 
-def print_aa(dcline,prevdcline):
-    s=u""
-    if not prevdcline: prevdcline=dcline
-    for dc1,dc2 in zip(prevdcline,dcline):
-        s+="\x1b[48;2;%d;%d;%dm"%ColorConversion(dc1)
-        s+="\x1b[38;2;%d;%d;%dm▄"%ColorConversion(dc2)
-    #print(s,'\x1b[0m')
-    sys.stderr.write(s+'\x1b[0m\n')
-    return
+def aa_rows(dcline,prevdcline):
+    """ a karaktersor felso es also felblokkjainak RGB szinei (az elso sornal nincs elozo: mindketto ugyanaz) """
+    return [ColorConversion(x) for x in prevdcline or dcline],[ColorConversion(x) for x in dcline]
+
+def print_aa(dcline,prevdcline,state):
+    """ truecolor (24 bit) felblokkokkal """
+    top,bot=aa_rows(dcline,prevdcline)
+    sys.stderr.write("".join("\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm▄"%(t+b) for t,b in zip(top,bot))+'\x1b[0m\n')
 
 palette16=[
     (0,0,0), # 0
@@ -108,51 +109,98 @@ palette16=[
     (216,216,216) # 7
 ]
 
+def dist2(c,rgb):
+    return (c[0]-rgb[0])*(c[0]-rgb[0])+(c[1]-rgb[1])*(c[1]-rgb[1])+(c[2]-rgb[2])*(c[2]-rgb[2])
+
+def ansi16(x):
+    """ palette16 index -> ANSI szinkod eltolas (30/40 + ez): 0-7 normal, 60-67 bright """
+    return x if x<8 else 60+x-8
+
 def rgb16dither(rgb):
-    bests=[]
-    for x in range(16):
-        c=palette16[x]
-        def dif(i): return (c[i]-rgb[i])*(c[i]-rgb[i])
-        d=dif(0)+dif(1)+dif(2)
-        bests.append((d,x))
-    bests.sort() # TODO: optimize!
+    """ a 2 legkozelebbi szin (hatter/eloter) + a keveresi aranyhoz legjobban illo " ░▒▓█" karakter """
+    bests=sorted((dist2(c,rgb),x) for x,c in enumerate(palette16))
     bg=bests[0][1] # best color
     fg=bests[1][1] # 2nd best
     c1=palette16[bg]
     c2=palette16[fg]
-    besti,bestd=-1,0
-    for i in range(5):
-#        f=[0,0.25,0.5,0.75,1][i]
-        f=[0,0.2,0.4,0.7,1][i]
-        def dif(i):
-            c=c1[i]+(c2[i]-c1[i])*f
-            return (c-rgb[i])*(c-rgb[i])
-        d=dif(0)+dif(1)+dif(2)
-        if besti<0 or d<bestd: besti,bestd=i,d
-    return "\x1b[%dm\x1b[%dm%s"%( 40+bg if bg<8 else 100+bg-8, 30+fg if fg<8 else 90+fg-8, " ░▒▓█"[besti])
+    mix=[0,0.2,0.4,0.7,1]   # [0,0.25,0.5,0.75,1]
+    besti=min(range(5),key=lambda i: dist2([c1[j]+(c2[j]-c1[j])*mix[i] for j in range(3)],rgb))
+    return "\x1b[%dm\x1b[%dm%s"%(40+ansi16(bg),30+ansi16(fg)," ░▒▓█"[besti])
 
-
-def rgb16(rgb):
-    best,bestd=-1,0
+def nearest16(r,g,b):
+    """ legkozelebbi palette16 szin, sulyozott ("redmean") tavolsaggal - a sima RGB tavolsag a feketet/szurket tulsulyozza """
+    best,bestd=0,None
     for x in range(16):
         c=palette16[x]
-        def dif(i): return (c[i]-rgb[i])*(c[i]-rgb[i])
-        d=dif(0)+dif(1)+dif(2)
-        if best<0 or d<bestd: best,bestd=x,d
-    return best if best<8 else 60+(best-8)
+        rm=(c[0]+r)*0.5
+        dr,dg,db=c[0]-r,c[1]-g,c[2]-b
+        d=(2+rm/256)*dr*dr+4*dg*dg+(2+(255-rm)/256)*db*db
+        if bestd is None or d<bestd: best,bestd=x,d
+    return best
 
-def print_aa16(dcline,prevdcline,dither=True):
-    s=u""
-    if not prevdcline: prevdcline=dcline
-    for dc1,dc2 in zip(prevdcline,dcline):
-        if dither: s+=rgb16dither(ColorConversion(dc1)) ; continue
-        s+="\x1b[%dm"%(40+rgb16(ColorConversion(dc1)))
-        s+="\x1b[%dm▄"%(30+rgb16(ColorConversion(dc2)))
-    #print(s,'\x1b[0m')
-    sys.stderr.write(s+'\x1b[0m\n')
-    return
+cube6=[0,95,135,175,215,255]
 
-aa_functions = {"truecolor": print_aa, "16": print_aa16}
+def nearest256(r,g,b):
+    """ xterm-256: 6x6x6 szinkocka (16-231) vagy 24 szurke (232-255) """
+    def lvl(v): return 0 if v<48 else 1 if v<115 else (int(v)-35)//40
+    ri,gi,bi=lvl(r),lvl(g),lvl(b)
+    cr,cg,cb=cube6[ri],cube6[gi],cube6[bi]
+    gi2=min(max(int((r+g+b)/3-8+5)//10,0),23)
+    gv=8+10*gi2
+    dc=(cr-r)**2+(cg-g)**2+(cb-b)**2
+    dg=(gv-r)**2+(gv-g)**2+(gv-b)**2
+    if dg<dc: return 232+gi2,(gv,gv,gv)
+    return 16+36*ri+6*gi+bi,(cr,cg,cb)
+
+def fs_dither(rows,quantize,state,damp=1.0):
+    """
+    Floyd-Steinberg hibaszoras a felblokk-racson (1 karakter = 2 pixel egymas alatt).
+    A kvantalasi hiba a kovetkezo sorra (es a kovetkezo hivasra is, state-ben) atmegy, igy a
+    kevés szinbol is kikeveredik a koztes arnyalat ahelyett, hogy nagy foltok egyszinuek lennenek.
+    quantize(r,g,b) -> (kod, (r,g,b)),  damp<1: a hibanak csak ennyiszereset viszi tovabb (kevesebb szines zaj)
+    """
+    out=[]
+    err=state.get('err')
+    for row in rows:
+        w=len(row)
+        if err is None or len(err)!=w: err=[(0.0,0.0,0.0)]*w
+        cur=[[c[0]+e[0],c[1]+e[1],c[2]+e[2]] for c,e in zip(row,err)]
+        nxt=[[0.0,0.0,0.0] for _ in range(w)]
+        codes=[]
+        for i in range(w):
+            r,g,b=[min(max(v,0.0),255.0) for v in cur[i]]
+            code,p=quantize(r,g,b)
+            codes.append(code)
+            e=((r-p[0])*damp,(g-p[1])*damp,(b-p[2])*damp)
+            for c in range(3):
+                if i+1<w: cur[i+1][c]+=e[c]*7/16
+                if i>0: nxt[i-1][c]+=e[c]*3/16
+                nxt[i][c]+=e[c]*5/16
+                if i+1<w: nxt[i+1][c]+=e[c]*1/16
+        err=[tuple(x) for x in nxt]
+        out.append(codes)
+    state['err']=err
+    return out
+
+def q16(r,g,b):
+    x=nearest16(r,g,b)
+    return ansi16(x),palette16[x]
+
+def print_aa16(dcline,prevdcline,state):
+    """ 16 szinu ANSI. blokkonkent 2 szin + ░▒▓ keverek """
+    sys.stderr.write("".join(rgb16dither(ColorConversion(x)) for x in prevdcline or dcline)+'\x1b[0m\n')
+
+def print_aa16x2(dcline,prevdcline,state):
+    """ 16 szinu ANSI. Floyd-Steinberg felblokkokkal """
+    top,bot=fs_dither(aa_rows(dcline,prevdcline),q16,state,damp=0.8)
+    sys.stderr.write("".join("\x1b[%d;%dm▄"%(40+t,30+b) for t,b in zip(top,bot))+'\x1b[0m\n')
+
+def print_aa256(dcline,prevdcline,state):
+    """ xterm-256 szin (ssh-n at is szinte minden terminal tudja) """
+    top,bot=fs_dither(aa_rows(dcline,prevdcline),nearest256,state)
+    sys.stderr.write("".join("\x1b[48;5;%d;38;5;%dm▄"%(t,b) for t,b in zip(top,bot))+'\x1b[0m\n')
+
+aa_functions = {"truecolor": print_aa, "16": print_aa16, "16x2": print_aa16x2, "256": print_aa256}
 
 
 ###############################################################################################################################
@@ -603,12 +651,13 @@ def testjpeg(d,debug=False):
                     qs=[quant.get(component[C]['Tq'],[1])[0]<<Al for C in cids]
                     dcy=0
                     prevdc=None
+                    aastate={}   # pl. a dithering hibaja sorrol sorra
                     def row_cb(row):
                         nonlocal dcy,prevdc
                         if dcy%mcuhs==0 or dcy%mcuhs==(mcuhs//2):
                             dc=[[v*qq for v,qq in zip(r,qs)] for r in row]
                             if dcy%mcuhs==0: prevdc=dc
-                            if dcy%mcuhs==(mcuhs//2): aa(dc,prevdc)
+                            if dcy%mcuhs==(mcuhs//2): aa(dc,prevdc,aastate)
                         dcy+=1
                     disp=(mcuw,mcuws,mcuws*160,row_cb)
                 ########################################################
