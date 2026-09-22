@@ -1,8 +1,8 @@
 #! /usr/bin/python3
 
 from struct import unpack
-import math
 import os
+import re
 import sys
 import time
 
@@ -10,21 +10,7 @@ def GetArray(type, l, length):
     """
     A convenience function for unpacking an array from bitstream
     """
-    s = ""
-    for i in range(length):
-        s = s + type
-    return list(unpack(s, l[:length]))
-
-
-def DecodeNumber(code, bits):
-    l = 2 ** (code - 1)
-    if bits >= l:
-        return bits
-    else:
-        return bits - (2 * l - 1)
-
-
-
+    return list(unpack(type * length, l[:length]))
 
 
 marker_mapping = {
@@ -44,7 +30,7 @@ marker_mapping = {
     0xffcd: "Start of Frame 13 - Differential sequential DCT, Arithmetic coding",
     0xffce: "Start of Frame 14 - Differential progressive DCT, Arithmetic coding",
     0xffcf: "Start of Frame 15 - Differential lossless, Arithmetic coding",
-    
+
     0xffd8: "Start of Image",
     0xffd9: "End of Image",
     0xffda: "Start of Scan",
@@ -78,279 +64,313 @@ marker_mapping = {
 }
 
 
+# a scan (entropy coded segment) vege: FF utan nem 00 (escape), nem RST (D0-D7) es nem D8 (ezt korabban is atengedtuk)
+# az FF+ a marker elotti opcionalis FF fill byte-okat is lenyeli
+scan_end_re = re.compile(b'\xff+[^\x00\xd0-\xd8\xff]', re.S)
+rst_split_re = re.compile(b'\xff+([\xd0-\xd7])')
+
+# ennyi 0 byte kerul a scan adat vegere, hogy a bitolvasonak ne kelljen a buffer veget figyelnie.
+# egy MCU max. 10 blokk, blokkonkent max 64*(16+16) bit = 256 byte -> 4096 boven eleg
+SCAN_PAD = bytes(4096)
+
+
+def build_huffman_luts(lengths, values):
+    """
+    65536 elemu lookup tablak (16 bites elonezet alapjan):
+      raw: (kodhossz<<8) | symbol
+      ac:  baseline AC-hez: ((kodhossz+extra bitek)<<8) | (run+1)   EOB: 0x80   (ZRL: 16, run=15+1 miatt)
+    0 = nem letezo kod.  Hiba eseten (None, None, hibauzenet)
+    """
+    raw = [0] * 65536
+    ac = [0] * 65536
+    code = 0
+    k = 0
+    for L in range(1, 17):
+        for _ in range(lengths[L - 1]):
+            if code >= (1 << L): return None, None, "invalid huffman table (code overflow at length %d)" % L
+            sym = values[k]
+            shift = 16 - L
+            start = code << shift
+            n = 1 << shift
+            raw[start:start + n] = [(L << 8) | sym] * n
+            r, t = sym >> 4, sym & 15
+            if t: e = ((L + t) << 8) | (r + 1)
+            elif r == 15: e = (L << 8) | 16   # ZRL
+            elif r == 0: e = (L << 8) | 0x80  # EOB
+            else: e = 0                       # EOBRUN: baseline-ban nem lehet
+            ac[start:start + n] = [e] * n
+            code += 1
+            k += 1
+        code <<= 1
+    return raw, ac, None
+
+
+###############################################################################################################################
+# entropy dekodolok. Mindegyik (dekodolt_mcu_szam, hibauzenet_vagy_None) -t ad vissza.
+# buf: a scan destuffolt (FF00->FF) adata RST markerek nelkul + SCAN_PAD, segs: [(start,end)] byte offsetek RST szegmensenkent
+# A bitolvaso: acc-ban nbits db ervenyes bit van (a felso bitek szemetek lehetnek), 32 bit ala esve 32 bittel toltjuk.
+###############################################################################################################################
+
+def decode_sequential(buf, segs, rst, mcu_max, blocks, ncomp, Se, disp):
+    """ baseline/extended DC+AC es progressive DC first pass (Se=0) """
+    mcu = 0
+    kend = Se + 1
+    mcuw, mcuws, rowmax = disp[0], disp[1], disp[2]
+    row_cb = disp[3]
+    x = 0
+    row = []
+    for (sstart, send) in segs:
+        pos = sstart
+        acc = 0
+        nbits = 0
+        pred = [0] * ncomp
+        n = mcu_max - mcu
+        if rst and rst < n: n = rst
+        endbits = send * 8
+        for _ in range(n):
+            for (ci, dclut, aclut) in blocks:
+                if nbits < 32:
+                    acc = ((acc & ((1 << nbits) - 1)) << 32) | (buf[pos] << 24) | (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3]
+                    pos += 4
+                    nbits += 32
+                e = dclut[(acc >> (nbits - 16)) & 0xFFFF]
+                if e == 0: return mcu, "DC huffman code not found"
+                nbits -= e >> 8
+                t = e & 0xFF
+                if t:
+                    if t > 16: return mcu, "bad DC magnitude %d" % t
+                    nbits -= t
+                    v = (acc >> nbits) & ((1 << t) - 1)
+                    if v < (1 << (t - 1)): v -= (1 << t) - 1
+                    pred[ci] += v
+                k = 1
+                while k < kend:
+                    if nbits < 32:
+                        acc = ((acc & ((1 << nbits) - 1)) << 32) | (buf[pos] << 24) | (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3]
+                        pos += 4
+                        nbits += 32
+                    e = aclut[(acc >> (nbits - 16)) & 0xFFFF]
+                    if e == 0: return mcu, "AC huffman code not found (or EOBRUN in sequential scan) at coef %d" % k
+                    nbits -= e >> 8
+                    s = e & 0xFF
+                    if s == 0x80: break  # EOB
+                    k += s
+                if k > kend: return mcu, "AC coefficient index overflow (%d)" % k
+            if pos * 8 - nbits > endbits: return mcu, "unexpected end of scan data"
+            mcu += 1
+            # ascii-art: minden mcuws-edik MCU DC erteke
+            if row_cb:
+                if x % mcuws == 0 and x < rowmax: row.append(tuple(pred))
+                x += 1
+                if x == mcuw:
+                    row_cb(row)
+                    row = []
+                    x = 0
+        left = send * 8 - (pos * 8 - nbits)
+        if left >= 8: print("WARNING: %d extra bytes at end of scan segment (MCU #%d)" % (left // 8, mcu))
+        if mcu >= mcu_max: break
+    return mcu, None
+
+
+def decode_dc_refine(buf, segs, rst, mcu_max, nblocks):
+    """ progressive DC refinement: 1 bit / blokk """
+    mcu = 0
+    for (sstart, send) in segs:
+        n = mcu_max - mcu
+        if rst and rst < n: n = rst
+        need = (n * nblocks + 7) // 8
+        if sstart + need > send: return mcu + ((send - sstart) * 8) // nblocks, "unexpected end of scan data"
+        mcu += n
+        if mcu >= mcu_max: break
+    return mcu, None
+
+
+def decode_ac_first(buf, segs, rst, bmax, raw, Ss, Se, mask):
+    """ progressive AC first pass (non-interleaved, 1 komponens). mask[blokk]: nem-nulla koefficiensek bitmaszkja (bit k-1) """
+    b = 0
+    for (sstart, send) in segs:
+        pos = sstart
+        acc = 0
+        nbits = 0
+        eobrun = 0
+        n = bmax - b
+        if rst and rst < n: n = rst
+        endbits = send * 8
+        bend = b + n
+        while b < bend:
+            if eobrun:
+                # EOB run: ezekben a blokkokban nincs ebben a savban nem-nulla koefficiens
+                skip = eobrun if eobrun < bend - b else bend - b
+                eobrun -= skip
+                b += skip
+                continue
+            m = mask[b]
+            k = Ss
+            while k <= Se:
+                if nbits < 32:
+                    acc = ((acc & ((1 << nbits) - 1)) << 32) | (buf[pos] << 24) | (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3]
+                    pos += 4
+                    nbits += 32
+                e = raw[(acc >> (nbits - 16)) & 0xFFFF]
+                if e == 0: return b, "AC huffman code not found at coef %d" % k
+                nbits -= e >> 8
+                r = (e >> 4) & 15
+                t = e & 15
+                if t:
+                    k += r
+                    nbits -= t
+                    m |= 1 << (k - 1)
+                    k += 1
+                elif r == 15:
+                    k += 16  # ZRL
+                else:
+                    eobrun = 1 << r
+                    if r:
+                        nbits -= r
+                        eobrun += (acc >> nbits) & ((1 << r) - 1)
+                    eobrun -= 1  # ez a blokk
+                    break
+            if k > Se + 1: return b, "AC coefficient index overflow (%d)" % k
+            mask[b] = m
+            b += 1
+            if pos * 8 - nbits > endbits: return b, "unexpected end of scan data"
+        if eobrun: print("WARNING: EOBRUN %d crosses restart marker / end of scan" % eobrun)
+        left = send * 8 - (pos * 8 - nbits)
+        if left >= 8: print("WARNING: %d extra bytes at end of scan segment (block #%d)" % (left // 8, b))
+        if b >= bmax: break
+    return b, None
+
+
+def decode_ac_refine(buf, segs, rst, bmax, raw, Ss, Se, mask):
+    """ progressive AC refinement pass (libjpeg decode_mcu_AC_refine alapjan) """
+    b = 0
+    for (sstart, send) in segs:
+        pos = sstart
+        acc = 0
+        nbits = 0
+        eobrun = 0
+        n = bmax - b
+        if rst and rst < n: n = rst
+        endbits = send * 8
+        bend = b + n
+        while b < bend:
+            m = mask[b]
+            k = Ss
+            if nbits < 32:
+                acc = ((acc & ((1 << nbits) - 1)) << 32) | (buf[pos] << 24) | (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3]
+                pos += 4
+                nbits += 32
+            if eobrun == 0:
+                while k <= Se:
+                    if nbits < 32:
+                        acc = ((acc & ((1 << nbits) - 1)) << 32) | (buf[pos] << 24) | (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3]
+                        pos += 4
+                        nbits += 32
+                    e = raw[(acc >> (nbits - 16)) & 0xFFFF]
+                    if e == 0: return b, "AC refine huffman code not found at coef %d" % k
+                    nbits -= e >> 8
+                    r = (e >> 4) & 15
+                    t = e & 15
+                    if t:
+                        if t != 1: return b, "bad AC refine magnitude %d" % t
+                        nbits -= 1  # sign
+                    elif r != 15:
+                        eobrun = 1 << r
+                        if r:
+                            nbits -= r
+                            eobrun += (acc >> nbits) & ((1 << r) - 1)
+                        break
+                    # r db meg nulla koefficiens atugrasa, kozben a nem-nullakhoz 1-1 korrekcios bit
+                    while k <= Se:
+                        if (m >> (k - 1)) & 1:
+                            if nbits < 1:
+                                acc = ((acc & ((1 << nbits) - 1)) << 32) | (buf[pos] << 24) | (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3]
+                                pos += 4
+                                nbits += 32
+                            nbits -= 1
+                        else:
+                            r -= 1
+                            if r < 0: break
+                        k += 1
+                    if t:
+                        if k > Se: return b, "AC refine coefficient index overflow"
+                        m |= 1 << (k - 1)
+                    k += 1
+            if eobrun > 0:
+                # a maradek nem-nulla koefficiensek korrekcios bitjei
+                while k <= Se:
+                    if (m >> (k - 1)) & 1:
+                        if nbits < 1:
+                            acc = ((acc & ((1 << nbits) - 1)) << 32) | (buf[pos] << 24) | (buf[pos + 1] << 16) | (buf[pos + 2] << 8) | buf[pos + 3]
+                            pos += 4
+                            nbits += 32
+                        nbits -= 1
+                    k += 1
+                eobrun -= 1
+            mask[b] = m
+            b += 1
+            if pos * 8 - nbits > endbits: return b, "unexpected end of scan data"
+        if eobrun: print("WARNING: EOBRUN %d crosses restart marker / end of scan" % eobrun)
+        left = send * 8 - (pos * 8 - nbits)
+        if left >= 8: print("WARNING: %d extra bytes at end of scan segment (block #%d)" % (left // 8, b))
+        if b >= bmax: break
+    return b, None
+
+
+###############################################################################################################################
+
 
 def testjpeg(d):
 #    l=len(d)
     print("JPEG file size: %d"%(len(d)))
 
-    huffman_ac_tables= [{}, {}, {}, {}]
-    huffman_dc_tables= [{}, {}, {}, {}]
+    huffman_ac_tables= [None, None, None, None]   # (raw_lut, ac_lut)
+    huffman_dc_tables= [None, None, None, None]
     quant={}
     component= {}
-
-    def map_codes_to_values(codes, values):
-       """ Map the huffman code to the right value """
-       out= {}
-       for i in range(len(codes)):
-          out[codes[i]]= values[i]
-       return out
-
-    def huffman_codes(huffsize):
-       """ Calculate the huffman code of each length """
-       huffcode= []
-       k= 0
-       code= 0
-
-       # Magic
-       for i in range(len(huffsize)):
-          si= huffsize[i]
-          for k in range(si):
-             huffcode.append((i+1,code))
-             code+= 1
-          code<<= 1
-
-       return huffcode
-
+    acmask= {}   # progressive: komponensenkent a blokkok nem-nulla AC koefficiens bitmaszkja
 
     def DefineQuantizationTables(data):
         l=0
-        while len(data)>=65:
-            (hdr,) = unpack("B", data[0:1])
-            quant[hdr] = GetArray("B", data[1 : 1 + 64], 64)
-#            print(hdr,quant[hdr])
-            data=data[65:]
-            l+=65
+        while len(data)>=1:
+            hdr = data[0]
+            size = 128 if (hdr>>4) else 64   # Pq=1: 16 bites tabla
+            if len(data)<1+size: break
+            quant[hdr&15] = list(unpack(">64H" if size==128 else "64B", data[1:1+size]))
+            data=data[1+size:]
+            l+=1+size
         return l
 
     def decodeHuffman(data):
-
       offset = 0
       while offset+17<=len(data):
-        (header,) = unpack("B", data[offset : offset + 1])
-#        print(header, header & 0x0F, (header >> 4) & 0x0F)
+        header = data[offset]
         offset += 1
 
         Th= header & 0x0F
-#        print("Th: %d" % Th)
         Tc= (header >> 4) & 0x0F
-#        print("Tc: %d" % Tc)
 
         lengths = GetArray("B", data[offset : offset + 16], 16)
         offset += 16
         print(Th,Tc,lengths)
-
-        # Generate the huffman codes
-        huffcode=huffman_codes(lengths)
-#        print("Huffcode", huffcode)
-
-        huffval= []
-#        total=0
-#        for i in lengths: total+=i
-        for i in huffcode:
-            huffval.append(data[offset])
-            offset+=1
-
-#        print(huffval)
-
-#        huffval=GetArray("B", data[offset : offset + huffcode], huffcode)
-#        total+=huffcode
-
-#        if offset+total>len(data): return -offset # hibas
-#        offset+=total
+        total = sum(lengths)
+        if Th>3 or Tc>1 or total>256 or offset+total>len(data):
+            print("ERROR! bad huffman table header")
+            return -offset
+        huffval = data[offset:offset+total]
+        offset += total
 
         # Generate lookup tables
+        raw, ac, err = build_huffman_luts(lengths, huffval)
+        if err:
+            print("ERROR!", err)
+            return -offset
         if Tc==0:
-            huffman_dc_tables[Th]= map_codes_to_values(huffcode, huffval)
+            huffman_dc_tables[Th]= raw
         else:
-            huffman_ac_tables[Th]= map_codes_to_values(huffcode, huffval)
+            huffman_ac_tables[Th]= (raw, ac)
 
       return offset
-
-
-    bits_avail=0
-    bits_data=0
-
-    # baseline DC+AC es progressive DC parser:
-    def read_data_unit(byte_stream,comp,dmax):
-       nonlocal bits_avail
-       nonlocal bits_data
-
-#       refining = (A&15) and (((A>>4)-(a&15))==1)
-#       refining = (A&15)!=0
-
-#       data=[0]*64
-       dc=0
-       d=0
-
-       huff_tbl= huffman_dc_tables[comp['Td']]
-       # Fill data with 64 coefficients
-       while d<dmax:
-
-          key=0
-          key_len=-1
-          for bits in range(1, 17):
-#             key<<= 1
-
-             # Get one bit from bit_stream
-
-             if bits_avail<=0:
-                bits_data=next(byte_stream)
-                if bits_data<0:
-                    if d>0: print("EOI found before finish MCU block (%d/%d)"%(d,dmax))
-                    return bits_data # EOF
-                bits_avail+=8
-
-             bits_avail-=1
-#             key |= (bits_data >> bits_avail)&1
-             key = (key<<1) | ((bits_data >> bits_avail)&1)
-
-    #         print(bits,val)
-             # If huffman code exists
-             try:
-                key_len= huff_tbl[(bits,key)]
-    #            print(bits,key,key_len)
-                break
-             except:
-                pass
-
-
-          if key_len<0:
-             print( (bits, key, bin(key)), "key not found (DC)" )
-             for k in huff_tbl: print(k,huff_tbl[k])
-             return -2 #break
-
-          # If ZRL fill with 16 zero coefficients
-          if key_len==0xF0:
-             d+=16
-#             for i in range(16): data.append(0)
-             continue
-
-          # If not DC coefficient
-          if d==0:
-             huff_tbl= huffman_ac_tables[comp['Ta']]
-          else: #if d!=0:
-             # If End of block
-             if key_len==0x00:
-                d=dmax #64
-                break
-
-             # The first part of the AC key_len
-             # is the number of leading zeros
-             d+=key_len >> 4
-             key_len&= 0x0F
-
-#          if d>dmax: break
-
-          if key_len!=0:
-             # The rest of key_len is the amount of "additional" bits
-             while bits_avail<key_len:
-                x=next(byte_stream)
-                if x<0: return x # EOF
-                bits_data=(bits_data<<8)|x
-                bits_avail+=8
-
-             ######################################################
-             bits_avail-=key_len
-             if d==0: # csak a DC erdekes nekunk!
-                sign=bits_data>>(bits_avail+key_len-1)
-                out=(bits_data>>bits_avail) & ((1<<key_len)-1)
-                dc=out if (sign&1) else out-((1 << key_len)-1)
-#             data[d]=out if (sign&1) else out-((1 << key_len)-1)
-             ######################################################
-
-          d+=1
-
-       if d!=dmax: print("Wrong MCU block size", d)
-       return 32768+dc #d #ata
-
-
-
-    # progressive scan eseten az AC-t maskepp kell beolvasni, egybe van az osszes block:
-    def read_data_unit_AC(byte_stream,comp,dmin,dmax):
-      nonlocal bits_avail
-      nonlocal bits_data
-
-      # Fill data with 64 coefficients
-      huff_tbl= huffman_ac_tables[comp['Ta']]
-      current_mcu=0
-      eob_run=0
-      while True:
-        d=dmin
-        while d<=dmax:
-
-          #---------------- read huffman code ----------------------
-          key=0
-          key_len=-1
-          for bits in range(1, 17):
-#             key<<=1
-             # Get one bit from bit_stream
-             if bits_avail<=0:
-                bits_data=next(byte_stream)
-                if bits_data<0: return current_mcu  #bits_data # EOF
-                bits_avail+=8
-
-             bits_avail-=1
-#             key |= (bits_data >> bits_avail)&1
-             key = (key<<1) | ((bits_data >> bits_avail)&1)
-
-             # If huffman code exists
-             try:
-                key_len= huff_tbl[(bits,key)]
-#                print(d,bits,"0x%02X"%(key),key_len)
-                break
-             except:
-                pass
-
-          if key_len<0:
-             print( (bits, key, bin(key)), "key not found (AC)" )
-             return current_mcu #break
-          #-----------------------------------------------------------
-
-          if key_len==0x00:
-              break
-
-          # If ZRL fill with 16 zero coefficients
-          if key_len==0xF0:
-              d+=16
-              continue
-
-          if key_len&0x0F==0: # EOB run
-              d=(1+(d//64))*64
-              key_len=key_len>>4
-              while bits_avail<key_len:
-                x=next(byte_stream)
-                if x<0: return current_mcu # EOF
-                bits_data=(bits_data<<8)|x
-                bits_avail+=8
-              bits_avail-=key_len
-              out=(bits_data>>bits_avail) & ((1<<key_len)-1)
-              current_mcu+= ((1 << key_len) | out)-1
-              break
-
-          d+=key_len>>4
-          key_len&=0x0F
-
-          if key_len>0:
-             # The rest of key_len is the amount of "additional" bits
-             while bits_avail<key_len:
-                x=next(byte_stream)
-                if x<0: return current_mcu # EOF
-                bits_data=(bits_data<<8)|x
-                bits_avail+=8
-
-             #data[d]=get_bitss(key_len, byte_stream)
-             ######################################################
-#             sign=bits_data>>(bits_avail-1)
-             bits_avail-=key_len
-#             out=(bits_data>>bits_avail) & ((1<<key_len)-1)
-#             data[d]=out if (sign&1) else out-((1 << key_len)-1)
-             ######################################################
-             d+=1
-
-        current_mcu+=1
-
-      return current_mcu
-
 
 
     def ColorConversion(dc):
@@ -368,7 +388,7 @@ def testjpeg(d):
         if not prevdcline: prevdcline=dcline
         for dc1,dc2 in zip(prevdcline,dcline):
             s+="\x1b[48;2;%d;%d;%dm"%ColorConversion(dc1)
-            s+="\x1b[38;2;%d;%d;%dm\u2584"%ColorConversion(dc2)
+            s+="\x1b[38;2;%d;%d;%dm▄"%ColorConversion(dc2)
         #print(s,'\x1b[0m')
         sys.stderr.write(s+'\x1b[0m\n')
         return
@@ -426,33 +446,36 @@ def testjpeg(d):
             if best<0 or d<bestd: best,bestd=x,d
         return best if best<8 else 60+(best-8)
 
-#        r,g,b=int(rgb[0]),int(rgb[1]),int(rgb[2])
-#        if r<128 and g<128 and b<128:
-#            return (r>>6)|((g>>6)<<1)|((b>>6)<<2)  # normal colors
-#        return 60 + (r>>7)|((g>>7)<<1)|((b>>7)<<2) # bright colors
-
-    def print_aa16(dcline,prevdcline,dither=False):
+    def print_aa16(dcline,prevdcline,dither=True):
         s=u""
         if not prevdcline: prevdcline=dcline
         for dc1,dc2 in zip(prevdcline,dcline):
             if dither: s+=rgb16dither(ColorConversion(dc1)) ; continue
             s+="\x1b[%dm"%(40+rgb16(ColorConversion(dc1)))
-            s+="\x1b[%dm\u2584"%(30+rgb16(ColorConversion(dc2)))
+            s+="\x1b[%dm▄"%(30+rgb16(ColorConversion(dc2)))
         #print(s,'\x1b[0m')
         sys.stderr.write(s+'\x1b[0m\n')
         return
 
 
     def StartOfScan(data,rst):
+        """ visszaad: (a scan utani marker pozicioja vagy -1, hibapont) """
         hdrlen = data[3]+(data[2]<<8)+2
         Ns=data[4]
-#        print("---------------------------------------------------------------------------------------------")
-#        print(hdrlen,len(data),"components in scan:",Ns)
+        if Ns<1 or Ns>4 or hdrlen!=6+2*Ns+2 or len(data)<hdrlen:
+            print("ERROR! bad SOS header")
+            return -1,10
+        if "dimensions" not in component:
+            print("ERROR! SOS before SOF")
+            return -1,10
         p=5
         cids=[]
         for i in range(Ns):
           # Read the scan component selector
           Cs= data[p]
+          if Cs not in component:
+              print("ERROR! SOS refers to unknown component 0x%02X"%(Cs))
+              return -1,10
           cids.append(Cs)
           # Read the huffman table selectors
           Ta= data[p+1]
@@ -464,174 +487,157 @@ def testjpeg(d):
           # Assign the AC huffman table
           component[Cs]['Ta']= Ta
 
-        # Should be zero if baseline DCT
         Ss= data[p]
-        # Should be 63 if baseline DCT
         Se= data[p+1]
-        # Should be zero if baseline DCT
         A= data[p+2]
+        Ah,Al = A>>4, A&15
         p+=3
         # Ns:3 Ss:0 Se:63 A:00 baseline
         # Ns:3 Ss:0 Se:0 A:00  progressive
         print( "Ns:%d Ss:%d Se:%d A:%02X C:%d Huff: DC=%d/AC=%d --------------------------------------------------------------------------------------------" % (Ns, Ss, Se, A, Cs, Td, Ta) )
-#        num_components= Ns
-#        dc= [0 for i in range(num_components+1)]
 
-#        print("after parsing header:",p,hdrlen)
         t0=time.time()
-        mcu_cnt=0
+        dims=component["dimensions"]
 
-        # ---------------------------------------------------#
-        def byte_reader():
-            nonlocal data
-            nonlocal p
-            nonlocal mcu_cnt
-            while p<len(data):
-                c=data[p]
-                if c==0xFF:
-                    if data[p+1]==0: p+=1  # FF 00 ---> FF
-                    elif data[p+1] in [0xD9,0xDA,0xC4]: break # EOI/SOS/DHT
-                    elif data[p+1]<0xD0 or data[p+1]>0xD7: # not restart marker?
-                        print("!!! unexpected marker 0xFF%02X at mcu #%d pos %d"%(data[p+1],mcu_cnt,p))
-                p+=1
-                yield c
-            while True:
-                yield -1 # EOF
-        # ---------------------------------------------------#
+        # ---------------- entropy coded data kivagasa, RST szegmensekre bontas, destuffing -------------------------
+        m=scan_end_re.search(data,hdrlen)
+        if m:
+            q=m.end()-2         # a marker (utolso FF) pozicioja
+            region=data[hdrlen:m.start()]
+        else:
+            q=-1
+            region=data[hdrlen:]
+        parts=rst_split_re.split(region)
+        segdata=parts[0::2]
+        rstmarkers=parts[1::2]
+        cnt0=region.count(b'\xff\x00')
+        errs=0
+        if region.find(b'\xff\xd8')>=0: print("WARNING: FFD8 inside scan data")
+        for i,mk in enumerate(rstmarkers):
+            if mk[0]!=0xD0+(i&7):
+                print("ERROR! bad restart marker sequence: FF%02X instead of FF%02X (#%d)"%(mk[0],0xD0+(i&7),i))
+                errs+=10
+                break
+        if rstmarkers and not rst:
+            print("ERROR! %d restart markers without restart interval"%(len(rstmarkers)))
+            errs+=10
+            segdata=[b''.join(segdata)]
+        bufparts=[]
+        segs=[]
+        o=0
+        for s in segdata:
+            s=s.replace(b'\xff\x00', b'\xff')
+            bufparts.append(s)
+            segs.append((o,o+len(s)))
+            o+=len(s)
+        bufparts.append(SCAN_PAD)
+        buf=b''.join(bufparts)
 
-#        print("Start bitstream parsing at",p)
-        byte_stream=byte_reader()
-        nonlocal bits_avail
-        nonlocal bits_data
-        bits_avail=0
-        EOF=False
-        rcnt=0
-
+        # ---------------- MCU/blokk szamok ---------------------------------------------------------------------------
         # MCU-k szama vizszintes es fuggoleges iranyban:
-        mcuw,mcuh=component["dimensions"]['MW'],component["dimensions"]['MH']
-        # a subsampled componentnel (altalaban a luma) 8x8 blokkok vannak a nagyobb MCU helyett:
-        if Ns==1 and (component[Cs]['H']*component[Cs]['V'])>1: mcuw,mcuh=((component["dimensions"]['W']+7)//8),((component["dimensions"]['H']+7)//8)
+        mcuw,mcuh=dims['MW'],dims['MH']
+        if Ns==1:
+            # non-interleaved scan: a komponens sajat 8x8 blokkjai (subsampled komponensnel kevesebb, mint az MCU-k*H*V)
+            c=component[Cs]
+            mcuw=(-(-dims['W']*c['H']//dims['Hmax'])+7)//8
+            mcuh=(-(-dims['H']*c['V']//dims['Vmax'])+7)//8
         mcu_max=mcuw*mcuh
 
-        if Ss>0: # progressive AC pass  (mivel ez mindig 8x8 blokkszamot ad vissza, el kell osztani a blokkszam/mcu (subsampling) ertekkel)
-          if (A>>4)==0: mcu_cnt+=read_data_unit_AC(byte_stream,component[Cs],Ss,Se) #//(component[Cs]['H']*component[Cs]['V'])
-        else:
-         ########################################################
-         dc=[]
-         prevdc=None
-         dc0=[0]*Ns
-         dc1=[0]*Ns
-         dcy=0
-         dcx=0
-         mcuws=max(int(mcuw/160),1)
-         if mcuw/mcuws>200: mcuws+=1
-#         mcuhs=mcuws*2
-#         if component[component["IDs"][0]]['H']<component[component["IDs"][0]]['V']: mcuhs//=2
-#         if component[component["IDs"][0]]['H']>component[component["IDs"][0]]['V']: mcuhs*=2
-         mcuhs=(mcuws*2*component[component["IDs"][0]]['H'])//component[component["IDs"][0]]['V']
-         print("ASCII scaling",mcuws,mcuhs,mcuw//mcuws,mcuh//mcuhs)
-         ########################################################
-         while not EOF:
-
-           # handle RST (restart marker)
-           if rst>0 and mcu_cnt>0 and mcu_cnt%rst==0:
-#              print("Reset! mcu #%d  bits_avail=%d p=%d marker[p]=0x%02X%02X"%(mcu_cnt,bits_avail,p,data[p],data[p+1]))
-              bits_avail=0 # skip bits up to byte boundary
-              dc0=[0]*Ns   # reset DC to zero
-              rst_m1=next(byte_stream) # skip RST marker
-              rst_m2=next(byte_stream)
-              if rst_m1!=0xFF or rst_m2<0xD0 or rst_m2>0xD7: break # valami nem OK!
-
-           # read MCU block: (HxV 8x8 blocks per component)
-           for i in range(Ns):
-            C=cids[i]
-            comp=component[C]
-            for j in range(comp['H']*comp['V'] if Ns>1 else 1):
-              if (A>>4)!=0:
-                # DC refining bits (1 bit/component/mcu)
-                if bits_avail<=0:
-                  bits_data=next(byte_stream)
-                  if bits_data<0: EOF=True
-                  bits_avail=8
-                bits_avail-=1
-                #mcu=(32768+256)*((bits_data>>bits_avail)&1) # mind1, ugyse latszik...
-              elif not EOF:
-                # Huffman-encoded 8x8 block:
-                mcu=read_data_unit(byte_stream,comp,Se+1)
-                if mcu<0:
-                  EOF=True
-                else:
-                  dc0[i]+=mcu-32768
-                  dc1[i]=(dc0[i]<<(A&15))*quant[comp['Tq']][0]
-
-           if not EOF:
-            if (dcx%mcuws)==0 and dcx<mcuws*160: dc.append(dc1[0:Ns])
-            dcx+=1
-            mcu_cnt+=1
-            # display scan:
-            if mcu_cnt%mcuw==0:
-              if (A>>4)==0:
-                if dcy%mcuhs==0: prevdc=dc
-                if dcy%mcuhs==(mcuhs//2): print_aa16(dc,prevdc,True)
-              dcy+=1
-              dcx=0
-              dc=[]
+        err=None
+        mcu_cnt=0
+        try:
+          if Ss>0: # progressive AC pass
+            if Ns!=1 or Se>63 or Ss>Se or not dims['progressive']:
+                err="bad AC scan parameters"
+            elif huffman_ac_tables[Ta] is None:
+                err="missing AC huffman table %d"%(Ta)
+            else:
+                mask=acmask.get(Cs)
+                if mask is None or len(mask)!=mcu_max:
+                    mask=acmask[Cs]=[0]*mcu_max
+                if Ah==0: mcu_cnt,err=decode_ac_first(buf,segs,rst,mcu_max,huffman_ac_tables[Ta][0],Ss,Se,mask)
+                else:     mcu_cnt,err=decode_ac_refine(buf,segs,rst,mcu_max,huffman_ac_tables[Ta][0],Ss,Se,mask)
+          elif Ah!=0: # progressive DC refining bits (1 bit/blokk)
+            nblocks=sum(component[C]['H']*component[C]['V'] for C in cids) if Ns>1 else 1
+            mcu_cnt,err=decode_dc_refine(buf,segs,rst,mcu_max,nblocks)
+          else:
+            if dims['progressive'] and Se!=0: err="bad DC scan parameters"
+            elif not dims['progressive'] and (Se!=63 or A!=0): print("WARNING: sequential scan with Ss=%d Se=%d A=%02X"%(Ss,Se,A))
+            blocks=[]
+            for i,C in enumerate(cids):
+                comp=component[C]
+                dct=huffman_dc_tables[comp['Td']]
+                act=huffman_ac_tables[comp['Ta']] if Se>0 else (None,None)
+                if dct is None or act is None:
+                    err="missing huffman table"
+                    break
+                for j in range(comp['H']*comp['V'] if Ns>1 else 1): blocks.append((i,dct,act[1]))
+            if not err:
+                ########################################################
+                disp=(mcuw,1,0,None)
+                if Cs==component["IDs"][0] or Ns>1:   # ascii-art csak ha a luma is benne van
+                    mcuws=max(int(mcuw/160),1)
+                    if mcuw/mcuws>200: mcuws+=1
+                    c0=component[component["IDs"][0]]
+                    mcuhs=max((mcuws*2*c0['H'])//c0['V'],1)
+                    print("ASCII scaling",mcuws,mcuhs,mcuw//mcuws,mcuh//mcuhs)
+                    qs=[quant.get(component[C]['Tq'],[1])[0]<<Al for C in cids]
+                    dcy=0
+                    prevdc=None
+                    def row_cb(row):
+                        nonlocal dcy,prevdc
+                        if dcy%mcuhs==0 or dcy%mcuhs==(mcuhs//2):
+                            dc=[[v*qq for v,qq in zip(r,qs)] for r in row]
+                            if dcy%mcuhs==0: prevdc=dc
+                            if dcy%mcuhs==(mcuhs//2): print_aa(dc,prevdc)
+                        dcy+=1
+                    disp=(mcuw,mcuws,mcuws*160,row_cb)
+                ########################################################
+                mcu_cnt,err=decode_sequential(buf,segs,rst,mcu_max,blocks,Ns,Se,disp)
+        except IndexError:
+            err="scan data overrun"
 
         t0=time.time()-t0
-        if mcu_cnt>0: print("%6d/%6d MCU%s blocks read!  p:%8d +%d bits  [%02X%02X]   time: %5d ms   (%d kB/s)"%(mcu_cnt,mcu_max,"!!!" if mcu_cnt<mcu_max or mcu_cnt>mcu_max+7 else "",p,bits_avail,data[p] if p<len(data) else 0,data[p+1] if p+1<len(data) else 0,int(t0*1000.0),int(p/1024/t0)))
-
+        print("%6d/%6d MCU%s blocks read!  %d bytes  time: %5d ms   (%d kB/s)"%(mcu_cnt,mcu_max,"!!!" if mcu_cnt!=mcu_max else "",len(region),int(t0*1000.0),int(len(region)/1024/max(t0,1e-6))))
+        if err:
+            print("ERROR! scan decoding failed at MCU #%d: %s"%(mcu_cnt,err))
+            errs+=10
+        elif mcu_cnt!=mcu_max:
+            errs+=10
 
         #######
-        p=hdrlen
-        l=len(data)-1
-        cnt0=0
-        cntRST=0
-        while p<l:
-            q=data.find(0xFF,p)
-            if q<=0: break
-#            if data[q+1]!=0: print("%8d  %02X"%(q,data[q+1]))
-            m=data[q+1]
-            if m!=0 and not (m>=0xD0 and m<=0xD8): # escape, restart markers
-                print("%d reset markers && %d escapes in %d bytes image data skipped"%(cntRST,cnt0,q))
-                sys.stdout.flush()
-#                for s in [b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00',b'\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF']:
-                for s in [bytearray(512), bytearray([0xFF] * 4)]:
-                    r=data.find(s,hdrlen,q)
-                    if r>=0: print("WARNING: %d x 0x%02X bytes repeating at %d"%(len(s),s[0],r))
-                print("MarkerAfterScan: FF%02X"%(m))
-                return q
-            if m==0: cnt0+=1
-            else: cntRST+=1
-            p=q+1
-        return -1
-
-
-
-
-
-
+        if q<0: return -1,errs
+        print("%d reset markers && %d escapes in %d bytes image data skipped"%(len(rstmarkers),cnt0,q))
+        sys.stdout.flush()
+        for s in [bytearray(512), bytearray([0xFF] * 4)]:
+            r=data.find(s,hdrlen,q)
+            if r>=0: print("WARNING: %d x 0x%02X bytes repeating at %d"%(len(s),s[0],r))
+        print("MarkerAfterScan: FF%02X"%(data[q+1]))
+        return q,errs
 
 
 
     def DecodeMPExt(data):
       try:
         endian=data[0:4]
-        offs,=unpack("<L",data[4:8])
-        cnt,=unpack("<H",data[offs:offs+2])
+        if endian==b'MM\x00\x2a': e='>'
+        elif endian==b'II\x2a\x00': e='<'
+        else: return -1
+        offs,=unpack(e+"L",data[4:8])
+        cnt,=unpack(e+"H",data[offs:offs+2])
         print(endian,offs,cnt)
-        offs+=2+12 # skip cnt+version
-        icnt,=unpack("<L",data[offs+8:offs+12])
-        isize,ioffs=unpack("<LL",data[offs+12+4:offs+12+12])
+        icnt=isize=ioffs=0
+        for i in range(cnt):
+            tag,typ,count,value=unpack(e+"HHLL",data[offs+2+i*12:offs+2+i*12+12])
+            if tag==0xB001: icnt=value          # NumberOfImages
+            elif tag==0xB002: isize,ioffs=count,value   # MPEntry
         print(icnt,isize,ioffs)
-        for i in range(icnt):
-            attr,size,offs,dep1,dep2=unpack("<LLLHH",data[ioffs+i*16:ioffs+i*16+16])
-#            print(attr,size,offs,dep1,dep2)
-            print("Individual image #%d: 0x%X  (%d bytes)"%(i,offs,size))
+        if isize:
+            for i in range(isize//16):
+                attr,size,offs,dep1,dep2=unpack(e+"LLLHH",data[ioffs+i*16:ioffs+i*16+16])
+                print("Individual image #%d: 0x%X  (%d bytes)"%(i,offs,size))
 
-#        for i in range(512): print(" %02X"%(data[i]),end='')
-#        print("")
-
-      except:
+      except Exception:
         return -1
       return len(data)
 
@@ -640,7 +646,7 @@ def testjpeg(d):
     errcnt=0
     rst=0
     mpext=False
-    markcnt={0xFFD8:0,0xFFD9:0,0xFFDA:0,0xFFC0:0,0xFFC2:0}
+    markcnt={0xFFD8:0,0xFFD9:0,0xFFDA:0,0xFFC0:0,0xFFC1:0,0xFFC2:0}
     while len(data)>1:
         if data[0]!=0xFF:
             p=data.find(0xFF)
@@ -657,10 +663,7 @@ def testjpeg(d):
             print("0x%04X (%d) %s"%(marker,lenchunk,marker_mapping.get(marker)))
         else:
             print("0x%04X %s"%(marker,marker_mapping.get(marker)))
-        try:
-            markcnt[marker]+=1
-        except:
-            markcnt[marker]=1
+        markcnt[marker]=markcnt.get(marker,0)+1
 
         if marker == 0xffd8:
             data = data[2:]
@@ -668,15 +671,11 @@ def testjpeg(d):
 
         if marker == 0xffd9:
             print(markcnt)
-            if markcnt[0xFFD8]!=1 or markcnt[0xFFD9]!=1 or markcnt[0xFFDA]<1 or markcnt[0xFFC0]+markcnt[0xFFC2]!=1:
+            if markcnt[0xFFD8]!=1 or markcnt[0xFFD9]!=1 or markcnt[0xFFDA]<1 or markcnt[0xFFC0]+markcnt[0xFFC1]+markcnt[0xFFC2]!=1:
                 print("Bad marker count!")
                 errcnt+=10
 
             p=2
-            # skip FF bytes at the end of file:
-#            while p<len(data):
-#                if data[p]!=0xFF: break
-#                p+=1
             # skip zero bytes at the end of file:
             while p<len(data):
                 if data[p]!=0: break
@@ -687,48 +686,54 @@ def testjpeg(d):
             # check for extra jpeg thumbnail/preview:
             p=data[:32].find(b'\xff\xd8')
             if p>=0 and len(data)>p+8:
-#            if len(data)>8 and data[0]==0xFF and data[1]==0xD8:
                 print("WARNING: %d bytes extra image !!!\n"%(len(data)))
                 errcnt+=testjpeg(data[p:])
             elif data.startswith(b'\x01\n\x0e\x00\x00\x00Image_UTC_Data'):
                 print("Skipping %d bytes Image_UTC_Data"%(len(data)))
             else:
-#            if len(data)>=6 and not mpext:
                 if len(data)>=4:
                     print("WARNING: %d bytes left:  %02X %02X %02X %02X"%(len(data),data[0],data[1],data[2],data[3]))
                     print(data[:128].hex(' '))
                     print(data[:128])
-#                    errcnt+=1
             return errcnt
 
+        if len(data)<4: break
+
         if marker == 0xffda:
-            hl=StartOfScan(data,rst)
+            hl,e=StartOfScan(data,rst)
+            errcnt+=e
             if hl<=0 or hl+2>len(data): break # EOF reached
             data = data[hl:]
             # next marker check
             marker = data[1]|(data[0]<<8)
-#    420 MarkerAfterScan: FFC4
-#  20900 MarkerAfterScan: FFD9
-#   7131 MarkerAfterScan: FFDA
             if marker not in [0xffda,0xffd9,0xFFC4]:
                 print("ERROR! bad marker after scan data: 0x%04X  "%(marker),marker_mapping.get(marker))
                 errcnt+=10
                 return errcnt
         else:
             lenchunk = data[3]+(data[2]<<8)+2
+            if lenchunk<4 or lenchunk>len(data):
+                print("ERROR! bad segment length %d"%(lenchunk))
+                errcnt+=10
+                break
             if marker==0xffc4:   # huffman table
                 hl=decodeHuffman(data[4:lenchunk])
-#                print(hl,lenchunk-4)
-            elif marker==0xffc0 or marker==0xffc2: # start of frame
+            elif marker in [0xffc0,0xffc1,0xffc2]: # start of frame
                 bits, height, width, components = unpack(">BHHB", data[4:4+6])
                 if bits!=8 or components not in [1,3,4] or width>8*height or height>5*width or width>2*8192 or height>2*8192 or width<16 or height<16:
                     print("WARNING! ",end = '')
-                    errcnt+=1   
+                    errcnt+=1
                     # ez jo: WARNING! dimensions: 1016 x 1002 x 4 / 8bit , ez is: WARNING! dimensions: 1252 x 1075 x 4 / 8bit
                     # ez is: WARNING! dimensions: 14032 x 9922 x 3 / 8bit
                     # WARNING! dimensions: 1970 x 8120 x 3 / 8bit
                 print("dimensions: %d x %d x %d / %dbit"%(width,height,components,bits))
-                component["dimensions"]={'W':width,'H':height}
+                if width==0 or height==0 or components==0 or lenchunk<10+components*3:
+                    print("ERROR! bad frame header")
+                    errcnt+=10
+                    break
+                component.clear()
+                acmask.clear()
+                component["dimensions"]={'W':width,'H':height,'progressive':marker==0xffc2}
                 hl=6+(components)*3
                 Vmax=1
                 Hmax=1
@@ -742,6 +747,10 @@ def testjpeg(d):
                     if V>Vmax: Vmax=V
                     Tq=data[10+i*3+2]
                     print("  component #%d: id=0x%02X sampling=%dx%d quant=0x%X"%(i,C,H,V,Tq))
+                    if H<1 or H>4 or V<1 or V>4:
+                        print("ERROR! bad sampling factor")
+                        errcnt+=10
+                        return errcnt
                     component["IDs"].append(C)
                     component[C]= {}
                     # Assign horizontal sampling factor
@@ -750,32 +759,24 @@ def testjpeg(d):
                     component[C]['V']= V
                     # Assign quantization table
                     component[C]['Tq']= Tq
-                Hmax*=8
-                Vmax*=8
-                component["dimensions"]['MW']=((width+Hmax-1)//Hmax)
-                component["dimensions"]['MH']=((height+Vmax-1)//Vmax)
+                component["dimensions"]['Hmax']=Hmax
+                component["dimensions"]['Vmax']=Vmax
+                component["dimensions"]['MW']=((width+Hmax*8-1)//(Hmax*8))
+                component["dimensions"]['MH']=((height+Vmax*8-1)//(Vmax*8))
                 print(component["dimensions"])
-
-#                print(hl,lenchunk-4,"dimensions: %d x %d x %d / %dbit"%(width,height,components,bits))
-#                print(hl,lenchunk-4)
             elif marker==0xffdb: # quant tables
                 hl=DefineQuantizationTables(data[4:lenchunk])
-#                print(hl,lenchunk-4)
-            elif marker==0xffe2: # MP 
-#    828 APP2 extension:  b'FPXR'
-#   7465 APP2 extension:  b'ICC_'
-#   1824 APP2 extension:  b'MPF\x00'
+            elif marker==0xffe2: # MP
                 print("APP2 extension: ",data[4:8])
                 if data[4:8]==b'MPF\x00':
-                    hl=DecodeMPExt(data[8:lenchunk])+4
+                    hl=DecodeMPExt(data[8:lenchunk])
+                    if hl>=0: hl+=4
                     mpext=True
                 else: hl=lenchunk-4
-#                print(hl,lenchunk-4)
             elif marker==0xffdd: # reset interval
                 rst = data[5]+(data[4]<<8)
                 print("RESET interval =",rst)
                 hl=2
-#                print(hl,lenchunk-4)
             else:
                 hl=lenchunk-4 # unknown type
             if hl<0:
@@ -794,8 +795,12 @@ def testjpeg(d):
 #f=open("/home/spamwall/backup/ext/jpg/fec98baf1e9f4697_17229344__BCR-114C-38.jpg","rb")
 
 if __name__ == "__main__":
-  path="jpeg2/"
-  for n in os.listdir(path):
-    print("\n\n==================== %s ======================\n"%(n))
-    res=testjpeg(open(path+n,"rb").read())
+  path=sys.argv[1] if len(sys.argv)>1 else "data/"
+  if os.path.isdir(path):
+    files=[os.path.join(path,n) for n in os.listdir(path)]
+  else:
+    files=sys.argv[1:]
+  for n in files:
+    print("\n\n==================== %s ======================\n"%(os.path.basename(n)))
+    with open(n,"rb") as f: res=testjpeg(f.read())
     if res>0: print("!!!HIBAS!!!",res)
