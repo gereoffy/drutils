@@ -74,9 +74,10 @@ def detect_and_test(f,size,fnev):
     # WMF: placeable (Aldus) vagy sima METAHEADER (tipus 1/2, 9 word-os header, verzio 0x100/0x300). Lehet nagyon kicsi is.
     if d[0:4]==b'\xd7\xcd\xc6\x9a' or (d[0:4] in [b'\x01\x00\x09\x00',b'\x02\x00\x09\x00'] and d[4:6] in [b'\x00\x01',b'\x00\x03']): return testwmf(d+f.read()),"wmf"
     if d[0:4]==b'\x01\x00\x00\x00' and d[40:44]==b' EMF': return testemf(d+f.read()),"emf"
-    if len(d)<256: return -1,"small"
+    # a GIF es a PNG is lehet nagyon kicsi (ikonok, 1 pixeles kepek)
     if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
-    if d[0]==0x89 and d[1:4]==b'PNG' and d[4]==0x0D and d[5]==0x0A and d[6]==0x1A: return testpng(d+f.read()),"png"
+    if d[0:8]==b'\x89PNG\r\n\x1a\n': return testpng(d+f.read()),"png"
+    if len(d)<256: return -1,"small"
     if d[0:4] in [b'MM\x00\x2A',b'II\x2A\x00']: return testtif(d+f.read()),"tif"
 
 #    if len(d)<4096: return -1,"small"
