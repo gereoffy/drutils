@@ -1,6 +1,7 @@
 #! /usr/bin/python3
 
 import io
+import re
 import zipfile
 import xml.parsers.expat
 
@@ -48,6 +49,25 @@ def check_member(zf, z, parse_xml):
     if parser: parser.Parse(b'', True)
 
 
+spv_ref_re = re.compile(rb'<vtb:(?:dataPath|path)>([^<]*)</')
+
+def check_spv(zf, infos, readok, log):
+    """
+    SPSS Viewer (.spv): az outputViewer*.xml-ek <vtb:dataPath>/<vtb:path> hivatkozasai letezo tagokra mutatnak
+    (a visszaallitott zip-ekbol tagok veszhetnek el, ezt a CRC nem jelzi). visszaad: hibauzenet vagy None
+    """
+    names = set(z.filename for z in infos)
+    refs = set()
+    for z in infos:
+        if z.filename.startswith("outputViewer") and z.filename.endswith(".xml") and z.filename in readok:
+            refs.update(r.decode('utf-8', 'replace') for r in spv_ref_re.findall(zf.read(z)))
+    for n in sorted(names - refs):
+        if n.endswith(".bin") or re.search(r'_(table|chart|notes|warning|model)\.xml$', n): log("WARNING: %s: not referenced" % n)
+    missing = sorted(refs - names)
+    if missing: return "%d referenced members missing, first: %s" % (len(missing), missing[0])
+    return None
+
+
 def testzip(data, debug=False):
     """ visszaad: (hibapont, kiterjesztes). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent. """
 
@@ -72,6 +92,7 @@ def testzip(data, debug=False):
             office = False
         log("ZIP: %d members, type: %s" % (len(infos), ext))
         bad = 0
+        readok = set()   # a hibatlanul beolvasott tagok
         for z in infos:
             if z.is_dir(): continue
             if z.flag_bits & 1:
@@ -83,6 +104,7 @@ def testzip(data, debug=False):
             log(z.filename, z.compress_size, z.file_size, "xml" if parse_xml else "")
             try:
                 check_member(zf, z, parse_xml)
+                readok.add(z.filename)
             except NotImplementedError as e:   # pl. Deflate64: nem tudjuk ellenorizni, de nem is hibas
                 log("WARNING: %s: %s" % (z.filename, e))
             except xml.parsers.expat.ExpatError as e:
@@ -94,6 +116,11 @@ def testzip(data, debug=False):
         if bad:
             if bad > 10: print("ERROR! ... %d bad members total" % bad)
             errcnt += 10
+        if ext == "spv":
+            err = check_spv(zf, infos, readok, log)
+            if err:
+                print("ERROR! SPV: %s" % err)
+                errcnt += 10
     return errcnt, ext
 
 
