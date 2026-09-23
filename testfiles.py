@@ -43,6 +43,7 @@ from testjpeg import testjpeg
 from testgif import testgif
 from testtif import testtif
 from testpsd import testpsd
+from testpng import testpng
 
 
 ###############################################################################################################################
@@ -282,89 +283,6 @@ def testwmf(data,debug=False):
     print("WMF: total %d records read, %d bytes left"%(num,len(data)-p))
     return 1
 
-
-###############################################################################################################################
-##############################################  PNG  ##########################################################################
-###############################################################################################################################
-
-def testpng(data):
-  magic=data[0:8] #    137 80 78 71 13 10 26 10
-#    print(magic)
-
-  errcnt=0
-  try:
-
-    chunks=[]
-#    zdata=b''
-    clen=0
-    ulen=0
-    zl=zlib.decompressobj()
-    p=8
-    while p+8<=len(data):
-        l,=unpack(">L",data[p:p+4])
-        c=data[p+4:p+8] # chunk name
-        chunks.append(c)
-        print(p,c,l)
-        crc = zlib.crc32(data[p+4:p+8+l])
-        ocrc,=unpack(">L",data[p+8+l:p+12+l])
-        if crc!=ocrc:
-            print("chunk CRC failed")
-            errcnt+=1
-        if c==b'IDAT':
-            zdata=zl.decompress(data[p+8:p+8+l])
-#            print(l,len(zdata))
-            clen+=l
-            ulen+=len(zdata)
-        if c==b'IHDR':
-            w,h,depth,color,compr,filt,ilace=unpack(">LLBBBBB",data[p+8:p+8+8+5])
-            print(w,h,depth,color,compr,filt,ilace)
-        #print (crc^ocrc) # print(crc,ocrc)
-        p+=12+l
-        if c==b'IEND': break # EOF
-
-    zdata=zl.flush()
-    ulen+=len(zdata)
-
-    if p!=len(data):
-        print(len(data)-p,"bytes left")
-#        errcnt+=1
-
-    if chunks[0]!=b'IHDR' or chunks[-1]!=b'IEND':
-        print("missing IDHR/IEND")
-        errcnt+=1
-
-    dmap={0:1,2:3,3:1,4:2,6:4}
-    bits=depth*dmap.get(color,0) # bits/pixel
-    #bits=depth*(1+(color&2)+(color>>2))
-#    scanlines=(((h+7)//8)*15) if ilace else h             # https://www.w3.org/TR/2003/REC-PNG-20031110/#8Interlace
-    if ilace:
-        hh=h//8      # teljes 8x blockok szama
-        hp=h-hh*8    # utolso block magassaga (0-7)
-#   1 6 4 6 2 6 4 6  = 1246 = 4
-#   7 7 7 7 7 7 7 7  = 1245 7 = 5
-#   5 6 5 6 5 6 5 6  = 1245 7 56 = 7
-#   7 7 7 7 7 7 7 7  = 1245 7 56 7 = 8
-#   3 6 4 6 3 6 4 6  = 1245 7 56 7 346 = 11
-#   7 7 7 7 7 7 7 7  = 1245 7 56 7 346 7 = 12
-#   5 6 5 6 5 6 5 6  = 1245 7 56 7 346 7 56 = 14
-#   7 7 7 7 7 7 7 7  = 1245 7 56 7 346 7 56 7 = 15
-        scanlines=hh*15 + [ 0, 4, 5, 7, 8, 11, 12, 14, 15][hp]
-    else: scanlines=h
-    rawsize=((w*bits+7)//8)*h + scanlines
-
-# Uncompressed data size: 775   2699 2716  1   52  37x18x32bits
-    print("Uncompressed data size:",clen,ulen,rawsize,ilace,scanlines,w,h,bits)
-    if ulen!=rawsize: errcnt+=1
-
-#    if errcnt==0:
-#    print("Compressed data size:",clen)
-#        udata=zlib.decompress(zdata)
-
-  except Exception as e:
-    errcnt+=10
-    print(repr(e))
-
-  return errcnt
 
 ###############################################################################################################################
 #############################################  detect  ########################################################################
