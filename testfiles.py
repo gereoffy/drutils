@@ -20,6 +20,7 @@ from testsav import testsav
 from testdxf import testdxf
 from testdwg import testdwg
 from testwmf import testwmf,testemf
+from testmp4 import testmp4,mp4_kind
 
 
 ###############################################################################################################################
@@ -45,7 +46,8 @@ ooxml_ok=("ole",)   # a jelszoval vedett docx/xlsx/pptx valojaban OLE file
 ext_types={"jpg":("jpg",),"jpeg":("jpg",),"png":("png",),"gif":("gif",),"tif":("tif",),"tiff":("tif",),"psd":("psd",),"psb":("psd",),
   "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"emf":("emf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
   "docx":("docx",)+ooxml_ok,"docm":("docx",)+ooxml_ok,"xlsx":("xlsx",)+ooxml_ok,"xlsm":("xlsx",)+ooxml_ok,"pptx":("pptx",)+ooxml_ok,
-  "odt":("odt",),"dxf":("dxf",),"dwg":("dwg",),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
+  "odt":("odt",),"dxf":("dxf",),"dwg":("dwg",),"heic":("heic",),"heif":("heic",),"avif":("heic",),
+  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
   "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv")}
 
 def testfile(f,size,fnev):
@@ -90,6 +92,8 @@ def detect_and_test(f,size,fnev):
 #    if d[0:4]==b'{\\rt': return testrtf(d),"rtf"
 
     if d[0:4]==b'AC10' and d[4:6].isdigit(): return testdwg(d+f.read()),"dwg"   # -1: nem tamogatott DWG verzio
+    kind=mp4_kind(d)   # ISO Base Media: mp4, mov, m4a, 3gp, heic...
+    if kind: return testmp4(d+f.read()),kind
     # DXF: binaris, vagy szoveges "0 / SECTION" kezdettel (elotte lehet 999-es megjegyzes)
     if d.startswith(b'AutoCAD Binary DXF\r\n\x1a\x00') or re.match(rb'[ \t]*(999[ \t]*\r?\n[^\n]*\n[ \t]*)?0[ \t]*\r?\nSECTION', d): return testdxf(d+f.read()),"dxf"
 
