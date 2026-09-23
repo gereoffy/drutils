@@ -19,6 +19,7 @@ from testole import testole,support_ole
 from testsav import testsav
 from testdxf import testdxf
 from testdwg import testdwg
+from testwmf import testwmf,testemf
 
 
 ###############################################################################################################################
@@ -36,61 +37,13 @@ def testpdf(d):
 
 
 ###############################################################################################################################
-##############################################  WMF  ##########################################################################
-###############################################################################################################################
-
-def testwmf(data,debug=False):
-    def getint(i,l): return int.from_bytes(data[i:i+l],byteorder="little",signed=False)
-    def getsint(i,l): return int.from_bytes(data[i:i+l],byteorder="little",signed=True)
-    # SpecialHeader:
-    magic=data[0:4]
-    if debug: print(magic,data[4:6])  # b'\xd7\xcd\xc6\x9a' b'\x00\x00'
-    x1=getsint(6,2)
-    y1=getsint(8,2)
-    x2=getsint(10,2)
-    y2=getsint(12,2)
-    dpi=getint(14,2)
-    rvd=getint(16,4)
-    crc=getint(20,2)
-    if debug: print(x1,y1,x2,y2,dpi,rvd,crc) # 0 0 1359 1360 96 0 22382
-    # Header:
-    p=22
-    ftyp=getint(p,2) # MetafileType
-    hsize=getint(p+2,2)
-    vers=getint(p+4,2)
-    size=getint(p+6,4)
-    objs=getint(p+10,2)
-    maxr=getint(p+12,4)
-    memb=getint(p+16,2)
-    if debug: print(ftyp,vers,hsize,size,objs,maxr,memb) # 1 verison=768 hsize=9 size=985 objs=7 maxr=658 memb=0
-    if debug: print((len(data)-p)/2) # ==size
-    p+=2*hsize
-    # Records:
-    num=0
-    while p+6<=len(data):
-        size=getint(p,4)
-        func=getint(p+4,2)
-        if debug: print(func,size)
-        if size>maxr:
-            print("Invalid record size: %d > %d"%(size,maxr))
-            return 2
-        p+=size*2
-        if func==0:
-            if p==len(data): return 0  # pont a vegere ertunk!
-            break
-        num+=1
-    print("WMF: total %d records read, %d bytes left"%(num,len(data)-p))
-    return 1
-
-
-###############################################################################################################################
 #############################################  detect  ########################################################################
 ###############################################################################################################################
 
 # kiterjesztes -> a felismert tartalom tipusa(i); ha nem egyezik, csak figyelmeztetunk (lehet, hogy csak rossz a neve)
 ooxml_ok=("ole",)   # a jelszoval vedett docx/xlsx/pptx valojaban OLE file
 ext_types={"jpg":("jpg",),"jpeg":("jpg",),"png":("png",),"gif":("gif",),"tif":("tif",),"tiff":("tif",),"psd":("psd",),"psb":("psd",),
-  "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
+  "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"emf":("emf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
   "docx":("docx",)+ooxml_ok,"docm":("docx",)+ooxml_ok,"xlsx":("xlsx",)+ooxml_ok,"xlsm":("xlsx",)+ooxml_ok,"pptx":("pptx",)+ooxml_ok,
   "odt":("odt",),"dxf":("dxf",),"dwg":("dwg",),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
   "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv")}
@@ -116,9 +69,10 @@ def detect_and_test(f,size,fnev):
             if b.strip(b'\x00'): break
             n+=len(b)
         f.seek(len(d))
+    # WMF: placeable (Aldus) vagy sima METAHEADER (tipus 1/2, 9 word-os header, verzio 0x100/0x300). Lehet nagyon kicsi is.
+    if d[0:4]==b'\xd7\xcd\xc6\x9a' or (d[0:4] in [b'\x01\x00\x09\x00',b'\x02\x00\x09\x00'] and d[4:6] in [b'\x00\x01',b'\x00\x03']): return testwmf(d+f.read()),"wmf"
+    if d[0:4]==b'\x01\x00\x00\x00' and d[40:44]==b' EMF': return testemf(d+f.read()),"emf"
     if len(d)<256: return -1,"small"
-
-    if d[0:6]==b'\xd7\xcd\xc6\x9a\x00\x00': return testwmf(d+f.read()),"wmf" # may be very small...
     if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
     if d[0]==0x89 and d[1:4]==b'PNG' and d[4]==0x0D and d[5]==0x0A and d[6]==0x1A: return testpng(d+f.read()),"png"
     if d[0:4] in [b'MM\x00\x2A',b'II\x2A\x00']: return testtif(d+f.read()),"tif"
