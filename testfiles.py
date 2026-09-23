@@ -5,17 +5,10 @@ sys.stdout.reconfigure(line_buffering=True)
 
 import os
 import stat
-import io
 import traceback
 
-# jpg/psd/png
+# xls:
 from struct import unpack,calcsize
-import zlib
-import math
-
-# docx/xlsx-hez:
-import xml.etree.ElementTree as ET
-import zipfile
 
 # pip3 install olefile
 try:
@@ -44,54 +37,7 @@ from testgif import testgif
 from testtif import testtif
 from testpsd import testpsd
 from testpng import testpng
-
-
-###############################################################################################################################
-##############################################  ZIP  ##########################################################################
-###############################################################################################################################
-
-
-def testxml(data):
-    try:
-        root = ET.fromstring(data)
-        print(root.tag, root.attrib)
-#    for child in root:  print(child.tag, child.attrib)
-        return 0
-    except:
-        return 1
-
-def testzip(data):
-  errcnt=0
-  ext="zip"
-  try:
-    with zipfile.ZipFile(io.BytesIO(data), mode='r') as zf:
-      for z in zf.infolist():
-        if z.is_dir() or z.file_size<1024: continue
-        if z.flag_bits&1:
-          print("ZIP.encrypted: "+str(z.filename))
-          continue # return -1 # ezzel ugyse tudunk semmit kezdeni...
-        try:
-          d=zf.open(z,mode='r').read()
-          print(z.filename,z.file_size,len(d))
-#          if z.filename.lower().endswith(".xml"): errcnt+=testxml(d)
-
-          if z.filename in ["word/document.xml","word/fontTable.xml","word/settings.xml","word/styles.xml","word/theme/theme1.xml"]: ext="docx"
-          if z.filename in ["xl/worksheets/sheet1.xml","xl/styles.xml","xl/theme/theme1.xml","xl/sharedStrings.xml"]: ext="xlsx"
-          if z.filename in ["ppt/presentation.xml","ppt/theme/theme1.xml","ppt/slides/slide1.xml","ppt/slideMasters/slideMaster1.xml"]: ext="pptx"
-          if z.filename.startswith("outputViewer000"): ext="spv" # contains the output generated from data analytics functions run within SPSS
-
-          if z.filename in ["[Content_Types].xml",
-            "word/document.xml","word/fontTable.xml","word/settings.xml","word/styles.xml","word/theme/theme1.xml",
-            "xl/worksheets/sheet1.xml","xl/styles.xml","xl/theme/theme1.xml","xl/sharedStrings.xml",
-            "ppt/presentation.xml","ppt/theme/theme1.xml","ppt/slides/slide1.xml","ppt/slideMasters/slideMaster1.xml"] or z.filename.startswith("outputViewer000"):
-              errcnt+=testxml(d)
-        except:
-          print("ZIP.read-Exception!!! %s" % (traceback.format_exc()))
-          errcnt+=1
-  except:
-    print("ZIP.open-Exception!!! %s" % (traceback.format_exc()))
-    errcnt+=10
-  return errcnt,ext
+from testzip import testzip
 
 
 ###############################################################################################################################
