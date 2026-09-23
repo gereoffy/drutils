@@ -18,6 +18,7 @@ from testzip import testzip
 from testole import testole,support_ole
 from testsav import testsav
 from testdxf import testdxf
+from testdwg import testdwg
 
 
 ###############################################################################################################################
@@ -91,7 +92,7 @@ ooxml_ok=("ole",)   # a jelszoval vedett docx/xlsx/pptx valojaban OLE file
 ext_types={"jpg":("jpg",),"jpeg":("jpg",),"png":("png",),"gif":("gif",),"tif":("tif",),"tiff":("tif",),"psd":("psd",),"psb":("psd",),
   "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
   "docx":("docx",)+ooxml_ok,"docm":("docx",)+ooxml_ok,"xlsx":("xlsx",)+ooxml_ok,"xlsm":("xlsx",)+ooxml_ok,"pptx":("pptx",)+ooxml_ok,
-  "odt":("odt",),"dxf":("dxf",),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
+  "odt":("odt",),"dxf":("dxf",),"dwg":("dwg",),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
   "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv")}
 
 def testfile(f,size,fnev):
@@ -134,6 +135,7 @@ def detect_and_test(f,size,fnev):
 
 #    if d[0:4]==b'{\\rt': return testrtf(d),"rtf"
 
+    if d[0:4]==b'AC10' and d[4:6].isdigit(): return testdwg(d+f.read()),"dwg"   # -1: nem tamogatott DWG verzio
     # DXF: binaris, vagy szoveges "0 / SECTION" kezdettel (elotte lehet 999-es megjegyzes)
     if d.startswith(b'AutoCAD Binary DXF\r\n\x1a\x00') or re.match(rb'[ \t]*(999[ \t]*\r?\n[^\n]*\n[ \t]*)?0[ \t]*\r?\nSECTION', d): return testdxf(d+f.read()),"dxf"
 
