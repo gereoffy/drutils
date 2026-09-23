@@ -125,6 +125,41 @@ def check_nal(d, a, size, nlen, codec):
     return None
 
 
+OBU_TYPES = {1, 2, 3, 4, 5, 6, 7, 8, 15}   # AV1: sequence header, temporal delimiter, frame header, tile group, metadata, frame, ...
+
+def check_obu(d, a, size):
+    """
+    AV1 minta/kepelem OBU-kra bontasa: fejlec (tiltott es fenntartott bit 0, ervenyes tipus), opcionalis kiterjesztes,
+    LEB128 hossz. A hosszaknak pontosan ki kell adniuk az adatot (az utolso OBU-nak lehet, hogy nincs hossz mezoje).
+    visszaad: hibauzenet vagy None
+    """
+    p = a
+    end = a + size
+    while p < end:
+        h = d[p]
+        if h & 0x81: return "bad OBU header 0x%02X at %d" % (h, p)
+        t = (h >> 3) & 15
+        if t not in OBU_TYPES: return "bad OBU type %d at %d" % (t, p)
+        q = p + 1 + ((h >> 2) & 1)
+        if h & 2:
+            l = 0
+            for i in range(8):
+                if q >= end: return "OBU size truncated at %d" % p
+                b = d[q]
+                q += 1
+                l |= (b & 0x7F) << (7 * i)
+                if not b & 0x80: break
+            else:
+                return "bad OBU size at %d" % p
+        else:
+            l = end - q         # hossz mezo nelkul: a minta vegeig tart
+        if q + l > end: return "OBU at %d: size %d, only %d bytes left" % (p, l, end - q)
+        # a zaro bitekkel vegzodo OBU-k (sequence header, frame header, metadata) utolso byte-ja nem lehet 0
+        if t in (1, 3, 5) and l and d[q + l - 1] == 0: return "OBU type %d at %d: missing trailing bits" % (t, p)
+        p = q + l
+    return None
+
+
 def check_track(d, trak, mdats, n, log, nal_check):
     """ egy track mintatablai es a mintak helye. visszaad: hibauzenet vagy None """
     tkhd = trak.find(b'tkhd')
@@ -150,6 +185,7 @@ def check_track(d, trak, mdats, n, log, nal_check):
     nent, = unpack_from('>L', d, q)
     codec = d[q + 8:q + 12] if nent else b''
     nalcodec = NAL_CODECS.get(codec)
+    av1 = codec == b'av01'
     nlen = None
     if nalcodec and nent:
         esize, = unpack_from('>L', d, q + 4)
@@ -239,10 +275,10 @@ def check_track(d, trak, mdats, n, log, nal_check):
         if off + csize > n: return "track %s: chunk #%d (%d+%d) outside of file (%d): truncated?" % (handler, ci, off, csize, n)
         if not any(a <= off and off + csize <= b for a, b in mdats):
             return "track %s: chunk #%d (%d+%d) not inside an mdat box" % (handler, ci, off, csize)
-        if nal_check and nlen and not ssize:
+        if nal_check and (nlen or av1) and not ssize:
             a = off
             for j in range(s, s + k):
-                err = check_nal(d, a, sizes[j], nlen, nalcodec)
+                err = check_obu(d, a, sizes[j]) if av1 else check_nal(d, a, sizes[j], nlen, nalcodec)
                 if err:
                     nalbad += 1
                     if first_nalerr is None: first_nalerr = "sample #%d at %d: %s" % (j, a, err)
@@ -366,13 +402,14 @@ def check_items(d, meta, n, log, nal_check=True):
     nitems = 0
     if nal_check:
         for iid, ext in extents.items():
-            codec = NAL_CODECS.get(types.get(iid))
-            if not ext or codec not in nlen: continue
+            typ = types.get(iid)
+            codec = NAL_CODECS.get(typ)
+            if not ext or (codec not in nlen and typ != b'av01'): continue
             data = b''.join(d[a:a + l] for a, l in ext)
-            err = check_nal(data, 0, len(data), nlen[codec], codec)
+            err = check_obu(data, 0, len(data)) if typ == b'av01' else check_nal(data, 0, len(data), nlen[codec], codec)
             if err: return "item %d (%s): %s" % (iid, types[iid].decode('latin1'), err)
             nitems += 1
-    log("MP4: %d items, %d image items NAL-checked" % (cnt, nitems))
+    log("MP4: %d items, %d image items checked (NAL/OBU)" % (cnt, nitems))
     return None
 
 
