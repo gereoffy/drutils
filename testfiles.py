@@ -4,15 +4,9 @@ import sys
 sys.stdout.reconfigure(line_buffering=True)
 
 import os
+import re
 import stat
 import traceback
-
-# pip3 install ezdxf
-try:
-  import ezdxf
-  support_dxf=True
-except:
-  support_dxf=False
 
 from testpdf import parse_pdf
 from testjpeg import testjpeg
@@ -23,6 +17,7 @@ from testpng import testpng
 from testzip import testzip
 from testole import testole,support_ole
 from testsav import testsav
+from testdxf import testdxf
 
 
 ###############################################################################################################################
@@ -38,18 +33,6 @@ def testpdf(d):
     print("PDF.open-Exception!!! %s" % (traceback.format_exc()))
     return 10
 
-
-###############################################################################################################################
-##############################################  DXF  ##########################################################################
-###############################################################################################################################
-
-def testdxf(fnev):
-  try:
-    doc = ezdxf.readfile(fnev)
-    return 0
-  except:
-    print("DXF.open-Exception!!! %s" % (traceback.format_exc()))
-    return 10
 
 ###############################################################################################################################
 ##############################################  WMF  ##########################################################################
@@ -108,7 +91,7 @@ ooxml_ok=("ole",)   # a jelszoval vedett docx/xlsx/pptx valojaban OLE file
 ext_types={"jpg":("jpg",),"jpeg":("jpg",),"png":("png",),"gif":("gif",),"tif":("tif",),"tiff":("tif",),"psd":("psd",),"psb":("psd",),
   "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
   "docx":("docx",)+ooxml_ok,"docm":("docx",)+ooxml_ok,"xlsx":("xlsx",)+ooxml_ok,"xlsm":("xlsx",)+ooxml_ok,"pptx":("pptx",)+ooxml_ok,
-  "odt":("odt",),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
+  "odt":("odt",),"dxf":("dxf",),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
   "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv")}
 
 def testfile(f,size,fnev):
@@ -151,7 +134,8 @@ def detect_and_test(f,size,fnev):
 
 #    if d[0:4]==b'{\\rt': return testrtf(d),"rtf"
 
-    if support_dxf and fnev.lower().endswith(".dxf"): return testdxf(fnev),"dxf"
+    # DXF: binaris, vagy szoveges "0 / SECTION" kezdettel (elotte lehet 999-es megjegyzes)
+    if d.startswith(b'AutoCAD Binary DXF\r\n\x1a\x00') or re.match(rb'[ \t]*(999[ \t]*\r?\n[^\n]*\n[ \t]*)?0[ \t]*\r?\nSECTION', d): return testdxf(d+f.read()),"dxf"
 
     return -1,"???"
 
