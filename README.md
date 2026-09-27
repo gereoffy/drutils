@@ -22,7 +22,10 @@ testfiles.py - file content validator/verifier (detects damaged/truncated files,
 File types are detected by content, not by extension. All-zero files are reported as BAD,
 extension/content mismatches as warnings. See FORMATS.md for what exactly is checked per format.
 
-Pure Python, the only (optional) dependency is olefile for OLE2 files (pip3 install olefile).
+For dwg, dxf, zip-based, ole, jpeg, tif, mp4/mov/heic and sav files a metadata line is printed per file
+(XXX_INFO;filename;version;type;created;modified;...), to identify recovered files: grep -a '^JPG_INFO;' out.txt > jpg.csv
+
+Pure Python, no external dependencies (OLE2 files are read by an own reader, olefile is no longer needed).
 PyPy is recommended for large data sets.
 
 
@@ -33,11 +36,12 @@ testtif.py  - tif  parser & validator
 testpsd.py  - psd/psb parser & validator  
 testwmf.py  - wmf/emf parser & validator  
 testzip.py  - zip-based formats (office, odf, epub, spv...) validator  
-testole.py  - OLE2 (doc/xls/ppt...) validator, needs olefile  
+testole.py  - OLE2 (doc/xls/ppt...) validator  
 testsav.py  - SPSS sav/zsav parser & validator  
 testdxf.py  - dxf (ASCII & binary) parser & validator  
 testdwg.py  - dwg integrity checker (CRC/checksums/Reed-Solomon)  
 testmp4.py  - mp4/mov/heic (ISOBMFF) structure & sample table validator  
+fileinfo.py - common code of the per-file metadata lines (XXX_INFO: dates, author, program, device)  
 testpdf.py  - pdf  parser & validator  
 
 All modules are used by testfiles.py, but can be run standalone (in debug mode) on a file or a directory, e.g.:

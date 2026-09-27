@@ -5,6 +5,10 @@
 
 import re
 from struct import unpack_from
+import datetime
+
+from fileinfo import print_info, result, plausible
+from testdwg import RELEASES
 
 BINARY_SENTINEL = b'AutoCAD Binary DXF\r\n\x1a\x00'
 
@@ -80,16 +84,39 @@ def binary_pairs(d, log):
         yield code, v, start
 
 
-def testdxf(data, debug=False):
-    """ visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent. """
+HEADER_VARS = (b'$ACADVER', b'$TDCREATE', b'$TDUPDATE', b'$LASTSAVEDBY')
+
+def _jd(v):
+    """ julian datum (nap.tort, helyi ido) -> datetime """
     try:
-        return parse_dxf(data, debug)
+        f = float(v.replace(b',', b'.') if isinstance(v, bytes) else v)
+        day = int(f)
+        return plausible(datetime.datetime(1970, 1, 1) + datetime.timedelta(days=day - 2440588, milliseconds=round((f - day) * 86400000)))
+    except Exception:
+        return None
+
+def testdxf(data, debug=False, fname=None):
+    """
+    visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent.
+    fname megadasa eseten kiir egy sort (grep -a -val CSV-be gyujtheto, lasd fileinfo.py):
+      DXF_INFO;filenev;verzio ($ACADVER);release;letrehozas;utolso mentes;header;utoljara mentette;;;;OK|BAD
+    """
+    hdr = {}
+    try:
+        res = parse_dxf(data, debug, hdr)
     except Exception as e:
         print("ERROR! exception:", repr(e))
-        return 100
+        res = 100
+    if fname is not None:
+        s = lambda k: (hdr[k].decode('latin1') if isinstance(hdr.get(k), bytes) else str(hdr.get(k, ""))).strip()
+        ver = s(b'$ACADVER')
+        created, modified = _jd(hdr.get(b'$TDCREATE')), _jd(hdr.get(b'$TDUPDATE'))
+        print_info("DXF", (fname, ver, RELEASES.get(ver, ""), created, modified, "header" if created or modified else "",
+                           s(b'$LASTSAVEDBY'), "", "", "", result(res)))
+    return res
 
 
-def parse_dxf(d, debug):
+def parse_dxf(d, debug, hdr={}):
 
     def log(*args):
         if debug: print(*args)
@@ -148,9 +175,10 @@ def parse_dxf(d, debug):
                 sections.append(v.decode('latin1') if isinstance(v, bytes) else str(v))
                 expect_name = False
                 continue
-            if code == 9 and section == b'HEADER': prev_var = v
-            elif code == 1 and prev_var == b'$ACADVER' and version is None:
-                version = v.decode('latin1') if isinstance(v, bytes) else str(v)
+            if section == b'HEADER':
+                if code == 9: prev_var = v
+                elif prev_var in HEADER_VARS and prev_var not in hdr: hdr[prev_var] = v   # a valtozo elso erteke
+            version = hdr.get(b'$ACADVER')
             if code == 66 and entity in (b'INSERT',): attribs_follow = int(v) == 1
             if code != 0: continue
 
@@ -197,6 +225,7 @@ def parse_dxf(d, debug):
     except ValueError as e:
         print("ERROR! DXF: %s" % e)
         return 10
+    if isinstance(version, bytes): version = version.decode('latin1')
     log("DXF: %s, version %s, %d pairs, sections: %s" % ("binary" if binary else "ASCII", version, npairs, " ".join(sections)))
     if comma: log("WARNING: %d numbers with decimal comma (exporter locale bug)" % comma)
     if not eof:
@@ -217,5 +246,5 @@ if __name__ == "__main__":
     files = sys.argv[1:]
   for n in files:
     print("\n\n==================== %s ======================\n" % (os.path.basename(n)))
-    with open(n, "rb") as f: res = testdxf(f.read(), debug=True)
+    with open(n, "rb") as f: res = testdxf(f.read(), debug=True, fname=n)
     if res > 0: print("!!!HIBAS!!!", res)

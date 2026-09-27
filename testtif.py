@@ -5,6 +5,8 @@ import struct
 import sys
 import zlib
 
+from fileinfo import print_info, result, tiff_meta, xmp_meta, image_info
+
 tagnames={}
 try:
     for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)),"tiff.csv"),"rt"):
@@ -155,13 +157,22 @@ checkers = {1: uncompressed_check, 5: lzw_check, 8: deflate_check, 32946: deflat
 ###############################################################################################################################
 
 
-def testtif(data, debug=False):
-    """ visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent. """
+def testtif(data, debug=False, fname=None):
+    """
+    visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent.
+    fname megadasa eseten kiir egy sort (grep -a -val CSV-be gyujtheto, lasd fileinfo.py):
+      TIF_INFO;filenev;szelesseg x magassag;tif;keszites;modositas;forras (exif|xmp);;szerzo;cim;program;eszkoz;OK|BAD
+    """
     try:
-        return parse_tif(data, debug)
+        res = parse_tif(data, debug)
     except Exception as e:
         print("ERROR! exception:", repr(e))
-        return 100
+        res = 100
+    if fname is not None:
+        exif = tiff_meta(data)
+        i = image_info(exif, xmp_meta(exif['xmp']) if 'xmp' in exif else None)
+        print_info("TIF", (fname, exif.get('dims', ""), "tif") + i[:3] + ("",) + i[3:] + (result(res),))
+    return res
 
 
 def parse_tif(data, debug):
@@ -330,5 +341,5 @@ if __name__ == "__main__":
     files = sys.argv[1:]
   for n in files:
     print("\n\n==================== %s ======================\n" % (os.path.basename(n)))
-    with open(n, "rb") as f: res = testtif(f.read(), debug=True)
+    with open(n, "rb") as f: res = testtif(f.read(), debug=True, fname=n)
     if res > 0: print("!!!HIBAS!!!", res)

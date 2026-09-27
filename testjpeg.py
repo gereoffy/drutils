@@ -6,13 +6,15 @@ import re
 import sys
 import time
 
+from fileinfo import print_info,result,tiff_meta,xmp_meta,image_info
+
 # DC alapu elonezet stderr-re (a DC dekodolas ellenorzesehez):
 #   None        - nincs
 #   "truecolor" - 24 bites szinek (iTerm2 stb.)
 #   "256"       - xterm-256 szin (ssh-n at is szinte mindenhol mukodik)
 #   "16x2"      - 16 szinu ANSI, 2 felblokkbol, szabvany terminalokhoz
 #   "16"        - 16 szinu ANSI, "░▒▓" keverek, szabvany terminalokhoz
-ASCII_ART = "256"
+ASCII_ART = None
 
 
 marker_mapping = {
@@ -464,8 +466,20 @@ def decode_ac_refine(buf, segs, rst, bmax, raw, Ss, Se, mask, log):
 ###############################################################################################################################
 
 
-def testjpeg(d,debug=False):
-    """ visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent. """
+def testjpeg(d,debug=False,embedded=False,fname=None):
+    """ visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent.
+        embedded=True: mas formatumba (pl. TIFF strip/tile) agyazott JPEG, a kepmeret-heurisztika kikapcsolva
+        fname megadasa eseten kiir egy sort (grep -a -val CSV-be gyujtheto, lasd fileinfo.py):
+          JPG_INFO;filenev;szelesseg x magassag;jpg;keszites;modositas;forras (exif|xmp);;szerzo;cim;program;eszkoz;OK|BAD """
+    meta={}
+    res=_testjpeg(d,debug,embedded,meta)
+    if fname is not None:
+        i=image_info(meta.get('exif'),meta.get('xmp'))
+        print_info("JPG",(fname,meta.get('dims',""),"jpg")+i[:3]+("",)+i[3:]+(result(res),))
+    return res
+
+
+def _testjpeg(d,debug,embedded,meta):
 
     def log(*args,**kw):
         if debug: print(*args,**kw)
@@ -796,7 +810,7 @@ def testjpeg(d,debug=False):
                 hl=decodeHuffman(data[4:lenchunk])
             elif marker in [0xffc0,0xffc1,0xffc2]: # start of frame
                 bits, height, width, components = unpack(">BHHB", data[4:4+6])
-                if bits!=8 or components not in [1,3,4] or width>8*height or height>5*width or width>2*8192 or height>2*8192 or width<16 or height<16:
+                if not embedded and (bits!=8 or components not in [1,3,4] or width>8*height or height>5*width or width>2*8192 or height>2*8192 or width<16 or height<16):
                     print("WARNING! ",end = '')
                     errcnt+=1
                     # ez jo: WARNING! dimensions: 1016 x 1002 x 4 / 8bit , ez is: WARNING! dimensions: 1252 x 1075 x 4 / 8bit
@@ -809,6 +823,7 @@ def testjpeg(d,debug=False):
                     print("ERROR! bad frame header")
                     errcnt+=10
                     break
+                meta.setdefault('dims',"%dx%d"%(width,height))
                 component.clear()
                 acmask.clear()
                 component["dimensions"]={'W':width,'H':height,'progressive':marker==0xffc2}
@@ -850,6 +865,10 @@ def testjpeg(d,debug=False):
                     hl=DecodeMPExt(data[8:lenchunk])
                     if hl>=0: hl+=4
                 else: hl=lenchunk-4
+            elif marker==0xffe1: # EXIF / XMP: csak a metaadatokhoz (JPG_INFO)
+                if data[4:10]==b'Exif\x00\x00' and 'exif' not in meta: meta['exif']=tiff_meta(data[10:lenchunk])
+                elif data[4:33]==b'http://ns.adobe.com/xap/1.0/\x00' and 'xmp' not in meta: meta['xmp']=xmp_meta(data[33:lenchunk])
+                hl=lenchunk-4
             elif marker==0xffdd: # reset interval
                 rst = data[5]+(data[4]<<8)
                 log("RESET interval =",rst)
@@ -880,5 +899,5 @@ if __name__ == "__main__":
     files=args
   for n in files:
     print("\n\n==================== %s ======================\n"%(os.path.basename(n)))
-    with open(n,"rb") as f: res=testjpeg(f.read(),debug=True)
+    with open(n,"rb") as f: res=testjpeg(f.read(),debug=True,fname=n)
     if res>0: print("!!!HIBAS!!!",res)

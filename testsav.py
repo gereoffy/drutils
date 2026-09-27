@@ -3,6 +3,9 @@
 # SPSS system file (.sav, $FL2) es zlib tomoritett valtozata (.zsav, $FL3) ellenorzese, kulso konyvtar nelkul.
 # Formatum leiras: GNU PSPP, "System File Format" (https://www.gnu.org/software/pspp/pspp-dev/html_node/System-File-Format.html)
 
+import datetime
+import re
+from fileinfo import print_info, result, plausible
 from struct import unpack_from
 import zlib
 
@@ -60,13 +63,41 @@ class Bytecode:
         return bool(self.cmds) or self.skip > 0
 
 
-def testsav(data, debug=False):
-    """ visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent. """
+MONTHS = {m: i + 1 for i, m in enumerate("jan feb mar apr may jun jul aug sep oct nov dec".split())}
+
+def sav_info(d):
+    """
+    a fejlecbol: (verzio, datum, program, cim). A datum a file irasanak ideje ('dd mmm yy' 'hh:mm:ss', helyi ido),
+    a program pl. '@(#) SPSS DATA FILE MS Windows Release 22.0'
+    """
+    t = None
     try:
-        return parse_sav(data, debug)
+        dd, mon, yy = d[92:101].decode('latin1').split()
+        h, mi, sec = (int(x) for x in d[101:109].decode('latin1').split(':'))
+        y = int(yy)
+        y += 1900 if y >= 70 else 2000
+        t = plausible(datetime.datetime(y, MONTHS[mon[:3].lower()], int(dd), h, mi, sec))
+    except Exception:
+        pass
+    prog = re.sub(r'^@\(#\)\s*(SPSS DATA FILE)?\s*', '', d[4:64].decode('latin1')).strip()
+    return d[0:4].decode('latin1'), t, prog, d[109:173].decode('latin1').strip()
+
+
+def testsav(data, debug=False, fname=None):
+    """
+    visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent.
+    fname megadasa eseten kiir egy sort (grep -a -val CSV-be gyujtheto, lasd fileinfo.py):
+      SAV_INFO;filenev;$FL2|$FL3;sav|zsav;letrehozas;utolso mentes;header;;;cim (file label);program;OK|BAD
+    """
+    try:
+        res = parse_sav(data, debug)
     except Exception as e:
         print("ERROR! exception:", repr(e))
-        return 100
+        res = 100
+    if fname is not None:
+        ver, t, prog, label = sav_info(data)
+        print_info("SAV", (fname, ver, "zsav" if ver == "$FL3" else "sav", t, t, "header" if t else "", "", "", label, prog, result(res)))
+    return res
 
 
 def parse_sav(d, debug):
@@ -244,5 +275,5 @@ if __name__ == "__main__":
     files = sys.argv[1:]
   for n in files:
     print("\n\n==================== %s ======================\n" % (os.path.basename(n)))
-    with open(n, "rb") as f: res = testsav(f.read(), debug=True)
+    with open(n, "rb") as f: res = testsav(f.read(), debug=True, fname=n)
     if res > 0: print("!!!HIBAS!!!", res)

@@ -6,7 +6,7 @@ kinullázott szektorok, bitflip, rossz helyről visszaállított adat) felderít
 szabványossági vizsgálata. Az író programok ismert furcsaságait (amitől a fájl nem sérült) figyelmeztetésként
 kezeljük, nem hibaként.
 
-Külső függőség csak egy van, az is opcionális: az `olefile` (OLE2: doc/xls/ppt). Minden más tiszta Python.
+Nincs külső függőség, minden tiszta Python (az OLE2-höz korábban kellő `olefile` helyett saját olvasó van).
 Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 
 ## Általános működés
@@ -18,7 +18,8 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
   - `< 0` → **DUNNO** (nem felismerhető, túl kicsi, vagy nem támogatott verzió).
 - **Csupa nulla fájl** (bármilyen kiterjesztéssel) → BAD (`file contains only zero bytes`). Tipikusan lefoglalt, de
   soha ki nem írt terület visszaállítás után.
-- **256 bájtnál kisebb fájl** → DUNNO (`small`), kivéve a WMF/EMF-et, ami lehet nagyon kicsi is.
+- **256 bájtnál kisebb fájl** → DUNNO (`small`), kivéve a GIF-et, a PNG-t és a WMF/EMF-et, amik lehetnek nagyon kicsik is
+  (ikonok, 1 pixeles képek).
 - **Kiterjesztés-figyelmeztetés** (nem változtat az eredményen): ha a kiterjesztés ismert, de a tartalom nem
   ismerhető fel (`WARNING! content not recognized as .jpg`), vagy más típusú (`WARNING! .wmf file, but content is jpg`).
   Kivételek: `.zip` néven bármilyen zip-alapú fájl, `.docx/.xlsx/.pptx` néven OLE (jelszóval védett Office fájl).
@@ -26,6 +27,17 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
   `debug=False` paramétere; önállóan futtatva (`pypy testjpeg.py fájl_vagy_könyvtár`) minden modul debug módban fut.
 - **Kivételkezelés:** minden ellenőrző elkapja a saját kivételeit (hibapont: 100), egy sérült fájl nem állítja le a
   futást, és nem okozhat segfaultot (nincs natív kód, kivéve a zlib-et).
+- **Metaadat-sorok (`XXX_INFO`)**, a visszaállított fájlok azonosításához (a fájlnév és a dátum elvész): a DWG, DXF,
+  ZIP-alapú, OLE, JPEG, TIFF, MP4/MOV/HEIC és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
+
+  `XXX_INFO;fájlnév;verzió;típus;létrehozás;utolsó mentés;dátum forrása;utoljára mentette;szerző;cím;program;[eszköz;]OK|BAD|DUNNO`
+
+  (A DWG-nél kicsit eltér, lásd ott.) Az `eszköz` mező (fényképezőgép, telefon) csak a JPG/TIF/MP4 sorokban van.
+  A dátumok helyi időben, `YYYY-MM-DD HH:MM:SS` formában, az UTC-ben tárolt értékek átszámolva. Az üres mező azt
+  jelenti, hogy a fájlban nincs (értelmes) adat. A mezőkből a `;` és a vezérlőkarakterek ki vannak szedve.
+  CSV-be gyűjtés: `grep -a '^JPG_INFO;' kimenet.txt > jpg.csv`. A `-a` kell, mert a kimenet más soraiban lehet
+  bináris szemét, és akkor a grep az egész bemenetet binárisnak veszi, és elnyeli a sorokat. A közös rész:
+  `fileinfo.py`.
 
 ## Összefoglaló táblázat
 
@@ -42,7 +54,7 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 | DXF (ASCII, bináris) | `testdxf.py` | csoportkódok, értéktípusok, szekciószerkezet, EOF | – |
 | DWG (R10 – 2018) | `testdwg.py` | verziócsaládonként a formátum saját ellenőrzőösszegei | CRC16, CRC32, Adler-32, Reed–Solomon |
 | WMF, EMF | `testwmf.py` | rekordok, paraméterek összhangja, EOF | placeable fejléc XOR-összeg |
-| MP4, MOV, M4A, 3GP, HEIC, AVIF (ISOBMFF) | `testmp4.py` | box-szerkezet, mintatáblák, **minden minta helye**, H.264/H.265 NAL-keretezés | – |
+| MP4, MOV, M4A, 3GP, HEIC, AVIF (ISOBMFF) | `testmp4.py` | box-szerkezet, mintatáblák, **minden minta helye**, H.264/H.265 NAL- és AV1 OBU-keretezés | – |
 
 ---
 
@@ -71,6 +83,12 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 `"truecolor"`, `"256"`, `"16x2"`, `"16"`), a DC-dekódolás szemrevételezéséhez.
 
 **Nem észleli:** olyan bitflipet, ami érvényes Huffman-kódot eredményez és nem változtat a blokkszámon.
+
+- **`JPG_INFO` sor:** verzió helyén a méret (`szélesség x magasság`). Az APP1 EXIF-ből: készítés
+  (DateTimeOriginal, ha nincs: DateTimeDigitized), módosítás (DateTime), szerző (Artist / XPAuthor), cím (XPTitle /
+  ImageDescription), program (Software), eszköz (Make + Model). Ha nincs EXIF dátum, az APP1 XMP-ből
+  (`xmp:CreateDate`, `xmp:ModifyDate`, `xmp:CreatorTool`, `dc:creator`, `dc:title`). Az EXIF dátumoknak nincs
+  időzónájuk, helyi időnek veszi őket. Csak a fő képre ír sort (a beágyazott és az extra képekre nem).
 
 ## PNG, APNG (`testpng.py`)
 
@@ -118,6 +136,9 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
   - **PackBits:** túlfutás, maradék adat,
   - **JPEG (compression=7):** strip-enként a `testjpeg` dekódolja, a JPEGTables tag tábláival kiegészítve.
 - Egyéb tömörítésnél (pl. CCITT G3/G4) csak a strip-ek helye ellenőrzött.
+- **`TIF_INFO` sor:** verzió helyén a méret (`szélesség x magasság`). Készítés: EXIF DateTimeOriginal (Digitized),
+  módosítás: DateTime (306), szerző: Artist, cím: XPTitle / ImageDescription, program: Software, eszköz: Make + Model.
+  Ha nincs EXIF dátum, az XMP (700-as tag) `xmp:CreateDate` / `xmp:ModifyDate`. Forrás: `exif`, `xmp`, vagy vegyesen.
 
 ## PSD, PSB (`testpsd.py`)
 
@@ -137,21 +158,46 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 **Felismerés:** `PK\3\4`. Típus: Office Open XML (docx, xlsx, pptx, vsdx), OpenDocument (odt, ods, odp, odg),
 epub (a `mimetype` tag alapján), SPSS Viewer (spv), jar, apk, egyéb zip.
 
-- A központi könyvtár beolvasása.
+- A központi könyvtár beolvasása. Visszaállított fájloknál:
+  - ha a zip vége (EOCD) után egy másik zip darabja van, saját zip-véggel (keveredés egy másik fájllal vagy korábbi
+    mentéssel), az hiba; az ellenőrzés és a metaadatok az első teljes zip alapján,
+  - ha a központi könyvtár nem a rögzített helyén van (hiányzik vagy ki van cserélve a fájl egy része), az hiba,
+  - ha nincs zip-vég (csonka fájl), a helyi fejlécekből újraépíti a központi könyvtárat, így a megmaradt tagok CRC-je
+    és a metaadatok ellenőrizhetők; a fájl ettől még BAD,
+  - a zip vége utáni sima szemét csak debug figyelmeztetés.
 - **Minden tag végigolvasása** (1 MB-os darabokban), **CRC32** tagonként.
 - Office/ODF/epub/spv esetén **minden `.xml` és `.rels` tag jólformáltsága** (streamelő expat parser, nem épít fát).
   Az üres XML tagokat (pl. a LibreOffice `Configurations2/accelerator/current.xml`) kihagyja.
 - Titkosított tag: kihagyva (debug módban jelezve). Nem támogatott tömörítés (pl. Deflate64): figyelmeztetés, nem hiba.
 - **SPSS Viewer (.spv):** az `outputViewer*.xml` fájlok `<vtb:dataPath>` / `<vtb:path>` hivatkozásai létező
   tagokra mutassanak (hiányzó tag → hiba; ezt a CRC nem jelzi).
+- **`ZIP_INFO` sor** (minden fájlról, debug módtól függetlenül), pl. `grep -a ^ZIP_INFO kimenet.txt > zip.csv` (a `-a` kell, mert a kimenet más soraiban lehet bináris szemét, és akkor a grep elnyeli a sorokat):
 
-## OLE2 / Compound File (`testole.py`, kell hozzá az `olefile`)
+  `ZIP_INFO;fájlnév;zip verzió;típus;létrehozás;utolsó mentés;dátum forrása;utoljára mentette;szerző;cím;program;OK|BAD`
+
+  - OOXML (docx/xlsx/pptx/vsdx): `docProps/core.xml` (created, modified, creator, lastModifiedBy, title) és `docProps/app.xml` (Application, AppVersion).
+  - ODF: `meta.xml` (creation-date, dc:date, initial-creator, dc:creator, title, generator).
+  - epub: a `container.xml` által mutatott `.opf` (dc:date, dcterms:modified, creator, title, generator). jar: `MANIFEST.MF` `Created-By`.
+  - Ha nincs értelmes metaadat-dátum: a zip tagok dátuma (NTFS / Unix extra mező, különben DOS dátum), a legrégebbi
+    a létrehozás, a legújabb az utolsó mentés. A dátum forrása: `meta`, `zip`, vagy vegyesen `zip/meta` (létrehozás/mentés).
+    Az MS Office minden tagnak 1980-01-01 00:00-t ír, ezt (és a jövőbeli dátumokat) figyelmen kívül hagyja.
+  - Minden dátum helyi időben (az OOXML UTC-ben tárol, átszámolva). Sérült metaadat-tagból annyit olvas ki, amennyit lehet.
+
+## OLE2 / Compound File (`testole.py`)
 
 **Felismerés:** `D0 CF 11 E0 A1 B1 1A E1`. Típus: doc, xls, ppt, db (Thumbs.db), egyéb OLE.
 
 **Konténer (minden OLE fájlra, bármilyen programé):**
-- Megnyitás az olefile-lal; csak a valódi hibák számítanak (`DEFECT_INCORRECT` és felette). A régi programok
-  ártalmatlan furcsaságai (pl. szemét a stream méret felső 32 bitjében) csak debug figyelmeztetések.
+- Saját OLE-olvasó (MS-CFB), külső könyvtár nélkül. Az olefile megnyitáskori ellenőrzéseit követi:
+  - **fejléc:** aláírás, CLSID, verzió, bájtsorrend, szektorméretek, fenntartott mezők, mini-cutoff,
+  - **FAT és DIFAT:** a DIFAT hossza és lezárása, csonka FAT-szektor,
+  - **könyvtár:** bejegyzés-típus, gyökér, névhossz, a piros-fekete fa minden mutatója a tartományon belül, minden
+    bejegyzés legfeljebb egyszer szerepel, nincs névütközés, két stream nem kezdődik ugyanazon a szektoron,
+  - **láncok:** a szektorindex a tartományon belül, csonka szektor, a lánc rövidebb a stream méreténél.
+
+  Ugyanazok számítanak hibának, mint az olefile-ban (`DEFECT_INCORRECT` és felette). A régi programok ártalmatlan
+  furcsaságai (pl. szemét a stream méret felső 32 bitjében) csak debug figyelmeztetések. A mintákon (2340 valódi,
+  140 korábbi és 1200 új szintetikusan sérült fájl) fájlonként ugyanazt az eredményt adja, mint az olefile-os változat.
 - **Minden stream végigolvasása**, a beágyazott storage-okban lévőké is (FAT-lánc, csonka szektor).
 - **FAT-konzisztencia:** minden lánc pontosan akkora, mint a stream mérete, ENDOFCHAIN-nel zárul, és **egy szektor
   sem tartozik két lánchoz** (könyvtár, MiniFAT, ministream, nagy és kis streamek).
@@ -178,6 +224,19 @@ epub (a `mimetype` tag alapján), SPSS Viewer (spv), jar, apk, egyéb zip.
 **Beágyazott képek:** a doc `Data`, a ppt `Pictures` streamjéből és az xls MSODRAWINGGROUP rekordjaiból a JPEG és
 PNG képeket (OfficeArt BLIP) kivágja, és a `testjpeg`-gel / `testpng`-vel ellenőrzi.
 
+**`OLE_INFO` sor** (minden fájlról, debug módtól függetlenül), pl. `grep -a ^OLE_INFO kimenet.txt > ole.csv`:
+
+`OLE_INFO;fájlnév;formátum verzió;típus;létrehozás;utolsó mentés;dátum forrása;utoljára mentette;szerző;cím;program;OK|BAD`
+
+- Formátum verzió: `Word6/95`, `Word97+`, `BIFF5`, `BIFF8`, `PPT97+`.
+- Forrás: a `\x05SummaryInformation` property set (saját olvasó, sérült streamből is annyit, amennyit lehet;
+  a szövegek a benne megadott kódlappal dekódolva). Ha nincs benne dátum (az Excel az utolsó mentést általában nem
+  írja), a gyökér könyvtárbejegyzés létrehozási / módosítási ideje. A dátum forrása: `meta`, `ole`, vagy `meta/ole`.
+- A dátumok helyi időben (a fájlban UTC FILETIME). A mintákon a doc-ok 90%-ánál az utolsó mentés
+  órára egyezik a fájl mtime-jával.
+- Ha a fájl a megnyitáskor hibás, a metaadatokat engedékeny módban olvassa újra, így sérült fájlból is kijön,
+  amennyi kiolvasható.
+
 ## SPSS .sav / .zsav (`testsav.py`)
 
 **Felismerés:** `$FL2` (sav) / `$FL3` (zsav, zlib). Tiszta Python: a korábbi pyreadstat-os ellenőrzés sérült
@@ -192,6 +251,9 @@ fájloknál segfaultolt.
   - **bájtkódos tömörítés:** az adatfolyam végigjárása, egész számú eset, **esetszám = a fejlécben lévő**,
   - **ZSAV:** zheader/ztrailer, a blokktáblázat (eltolások, méretek), **minden zlib blokk kitömörítése**
     (Adler-32), a kitömörített adat bájtkódos ellenőrzése.
+- **`SAV_INFO` sor:** verzió: `$FL2` / `$FL3`. A fejléc dátuma (`dd mmm yy hh:mm:ss`, helyi idő) a fájl írásának
+  ideje, ez kerül a létrehozás és az utolsó mentés mezőbe is. Cím: a fájl címkéje (file label), program: a fejléc
+  termékneve (pl. `IBM SPSS STATISTICS 64-bit MS Windows 21.0.0.0`, `Stata 16.1/-savespss-`).
 
 ## DXF (`testdxf.py`)
 
@@ -205,6 +267,8 @@ fájloknál segfaultolt.
 - **Bináris DXF:** 1 bájtos (R12) és 2 bájtos (R13+) csoportkódok, típusos értékek, csonka érték / lezáratlan szöveg.
 - **Szerkezet:** SECTION/ENDSEC, TABLE/ENDTAB, BLOCK/ENDBLK párok, POLYLINE és attribútumos INSERT után
   VERTEX/ATTRIB…SEQEND, van ENTITIES szekció, **`EOF` a végén** (hiányzik → csonka), EOF után nincs adat.
+- **`DXF_INFO` sor:** verzió: `$ACADVER` (és a kiadás, pl. `R2007`), létrehozás / utolsó mentés: `$TDCREATE` /
+  `$TDUPDATE` (Julian dátum, helyi idő), utoljára mentette: `$LASTSAVEDBY`. Szerző és cím nincs a DXF-ben.
 
 ## DWG (`testdwg.py`)
 
@@ -221,6 +285,15 @@ ellenőrzőösszegeit.
 
 - R10: az üres szakasz/tábla fájlon kívüli címe (adat nem veszett el) csak figyelmeztetés.
 - Nem támogatott (régebbi) verzió (AC1001–AC1004, AC2.x…) → DUNNO.
+- **`DWG_INFO` sor** (minden fájlról, debug módtól függetlenül), a visszaállított fájlok azonosításához, pl.
+  `grep -a ^DWG_INFO kimenet.txt > dwg.csv`:
+
+  `DWG_INFO;fájlnév;verzió;kiadás;létrehozás;utolsó mentés;utoljára mentette;szerző;cím;OK|BAD|DUNNO`
+
+  A dátumok forrása: R10–R12 a fejléc fix helye, R13–R2000 a fejlécváltozók bitfolyama, R2004+ az
+  `AcDb:SummaryInfo` szakasz (ha hiányzik, R2004-ben a fejlécváltozók). A „utoljára mentette”, „szerző” és „cím” csak
+  R2004+-ban van. Az üres mező azt jelenti, hogy a fájlban nincs érvényes érték (egyes nem AutoCAD programok
+  nem töltik ki a dátumot; a létrehozás dátuma sablonból öröklött is lehet, pl. 1982/1992).
 - R2007-ben a nem RS-kódolt kis szakaszok (előnézet, összefoglaló) tartalma nem ellenőrizhető.
 
 ## WMF, EMF (`testwmf.py`)
@@ -266,9 +339,18 @@ ellenőrzőösszegeit.
   kiadják a minta méretét), érvényes NAL-fejléc, és **a NAL-egységek belsejében nincs tiltott `00 00 00/01/02`
   bájtsorozat** (emulation prevention). Ez a kinullázott blokkokat a videóadat belsejében is megfogja. A NAL végi
   nulla kitöltést és egyes kódolók által a szelet végére fűzött „end of sequence” NAL-t elfogadja.
+- **AV1 videó (`av01`):** minden minta OBU-kra bontása (fejléc: tiltott és fenntartott bit, érvényes típus; LEB128
+  hossz, a hosszak pontosan kiadják a mintát; a sequence/frame header és a metadata OBU záró bitjei).
 - **HEIC / HEIF / AVIF képek:** az `iloc` elemek adata a fájlon belül van, az elsődleges elem (`pitm`) létezik, és a
-  HEVC/AVC képelemek (az iPhone-képek csempéi) ugyanúgy NAL-ellenőrzésen mennek át.
+  HEVC/AVC képelemek (az iPhone-képek csempéi) NAL-, az AV1 képelemek (AVIF) OBU-ellenőrzésen mennek át.
 - A hang (AAC stb.) és a többi kodek adatát nem vizsgálja (nincs benne ellenőrizhető keretezés).
+- **`MP4_INFO` sor:** verzió: a márka (`ftyp`: `mp42`, `qt`, `heic`…), típus: `mp4` / `mov` / `heic`.
+  - Videó: létrehozás: a felvétel ideje (Apple `com.apple.quicktime.creationdate`, időzónával), ha nincs, az `mvhd`
+    létrehozási ideje (UTC, 1904 óta), végül a `©day`. Utolsó mentés: az `mvhd` módosítási ideje. (Az `mvhd` a vágó- vagy
+    exportáló program mentési ideje is lehet, ezért a felvétel idejénél a `creationdate` az elsődleges.)
+    Szerző, cím, program, eszköz: QuickTime `udta` (`©ART`, `©nam`, `©swr`, `©mak`, `©mod`), iTunes `ilst` (`©too`) és a
+    QuickTime `keys` metaadatok. Forrás: `meta`, `mvhd`, vagy vegyesen.
+  - HEIC/HEIF kép: az `Exif` elem (az `iloc` alapján), ugyanúgy, mint a JPEG-nél. Forrás: `exif`.
 
 ---
 
@@ -283,7 +365,6 @@ Ezeket formátumszintű ellenőrzéssel nem lehet kiszűrni:
 Csak szintetikus (generált) mintán tesztelt, valódi fájlon még nem:
 - ZSAV (`$FL3`) és big-endian SAV,
 - bináris DXF (az ezdxf-fel generált mintákon tesztelve),
-- JPEG-tömörítésű TIFF, APNG,
-- AVIF (az ISOBMFF-ágon generált minta sem volt; a HEIC-ek valódi iPhone-fotók).
+- JPEG-tömörítésű TIFF, APNG.
 
 Nem támogatott: BigTIFF, a DWG R10 előtti verziói, EMF+ (az EMF-be ágyazott GDI+ rekordok tartalma).

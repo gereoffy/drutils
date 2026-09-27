@@ -15,7 +15,7 @@ from testtif import testtif
 from testpsd import testpsd
 from testpng import testpng
 from testzip import testzip
-from testole import testole,support_ole
+from testole import testole
 from testsav import testsav
 from testdxf import testdxf
 from testdwg import testdwg
@@ -78,25 +78,25 @@ def detect_and_test(f,size,fnev):
     if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
     if d[0:8]==b'\x89PNG\r\n\x1a\n': return testpng(d+f.read()),"png"
     if len(d)<256: return -1,"small"
-    if d[0:4] in [b'MM\x00\x2A',b'II\x2A\x00']: return testtif(d+f.read()),"tif"
+    if d[0:4] in [b'MM\x00\x2A',b'II\x2A\x00']: return testtif(d+f.read(),fname=fnev),"tif"
 
 #    if len(d)<4096: return -1,"small"
 
-    if d[0]==0x50 and d[1]==0x4b and d[2]==3 and d[3]==4: return testzip(d+f.read())#,"zip"
+    if d[0]==0x50 and d[1]==0x4b and d[2]==3 and d[3]==4: return testzip(d+f.read(),fname=fnev)#,"zip"
     if d[0:4]==b'8BPS' and d[4]==0 and d[5] in [1,2]: return testpsd(d+f.read()),"psd"  # 2: PSB
 
-    if d[0:4] in [b'$FL2',b'$FL3']: return testsav(d+f.read()),"sav"
-    if support_ole and d[0]==0xD0 and d[1]==0xCF and d[2]==0x11 and d[3]==0xE0 and d[4]==0xA1 and d[5]==0xB1: return testole(d+f.read())#,"ole"
-    if d[0]==0xff and d[1]==0xd8 and d[2]==0xff and d[3]>=0xC0: return testjpeg(d+f.read()),"jpg"
+    if d[0:4] in [b'$FL2',b'$FL3']: return testsav(d+f.read(),fname=fnev),"sav"
+    if d[0]==0xD0 and d[1]==0xCF and d[2]==0x11 and d[3]==0xE0 and d[4]==0xA1 and d[5]==0xB1: return testole(d+f.read(),fname=fnev)#,"ole"
+    if d[0]==0xff and d[1]==0xd8 and d[2]==0xff and d[3]>=0xC0: return testjpeg(d+f.read(),fname=fnev),"jpg"
     if d.find(b'%PDF-',0,32)>=0: return testpdf(d+f.read()),"pdf"
 
 #    if d[0:4]==b'{\\rt': return testrtf(d),"rtf"
 
-    if d[0:4]==b'AC10' and d[4:6].isdigit(): return testdwg(d+f.read()),"dwg"   # -1: nem tamogatott DWG verzio
+    if d[0:4]==b'AC10' and d[4:6].isdigit(): return testdwg(d+f.read(),fname=fnev),"dwg"   # -1: nem tamogatott DWG verzio
     kind=mp4_kind(d)   # ISO Base Media: mp4, mov, m4a, 3gp, heic...
-    if kind: return testmp4(d+f.read()),kind
+    if kind: return testmp4(d+f.read(),fname=fnev),kind
     # DXF: binaris, vagy szoveges "0 / SECTION" kezdettel (elotte lehet 999-es megjegyzes)
-    if d.startswith(b'AutoCAD Binary DXF\r\n\x1a\x00') or re.match(rb'[ \t]*(999[ \t]*\r?\n[^\n]*\n[ \t]*)?0[ \t]*\r?\nSECTION', d): return testdxf(d+f.read()),"dxf"
+    if d.startswith(b'AutoCAD Binary DXF\r\n\x1a\x00') or re.match(rb'[ \t]*(999[ \t]*\r?\n[^\n]*\n[ \t]*)?0[ \t]*\r?\nSECTION', d): return testdxf(d+f.read(),fname=fnev),"dxf"
 
     return -1,"???"
 

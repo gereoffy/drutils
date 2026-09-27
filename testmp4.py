@@ -7,8 +7,11 @@
 # osszhangja es minden minta (videokocka, hangcsomag) helye a fileban. H.264/H.265 videonal a mintak NAL egysegekre
 # bontasa is ellenorizve van (a hosszaknak pontosan ki kell adniuk a minta meretet).
 
+import datetime
 import re
 from struct import unpack_from
+
+from fileinfo import print_info, result, plausible, utc_to_local, iso_local, date_source, tiff_meta, device
 
 # boxok, amelyeknek gyerek boxai vannak (a tobbi level, annak csak a hatarait nezzuk)
 CONTAINERS = {b'moov', b'trak', b'mdia', b'minf', b'stbl', b'dinf', b'edts', b'udta', b'mvex', b'moof', b'traf',
@@ -430,22 +433,141 @@ def mp4_kind(d):
     return 'mov' if d[4:8] in (b'moov', b'mdat', b'wide', b'pnot') else 'mp4'
 
 
-def testmp4(data, debug=False, nal_check=True):
-    """ visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent. """
+
+###############################################################################################################################
+# MP4_INFO: felvetel / modositas ideje, eszkoz, program (a visszaallitott fileok azonositasahoz)
+
+def _item_data(d, meta, want):
+    """ HEIF: az adott tipusu (pl. b'Exif') elso elem adata az iloc alapjan, vagy None """
+    iinf, iloc = meta.find(b'iinf'), meta.find(b'iloc')
+    if not iinf or not iloc: return None
+    iid = None
+    v, fl, q = full(d, iinf)
+    if not iinf.children: parse_boxes(d, q + (2 if v == 0 else 4), iinf.end, iinf, lambda *a: None, 2)
+    for infe in iinf.findall(b'infe'):
+        v, fl, q = full(d, infe)
+        if v >= 2:
+            i = unpack_from('>H' if v == 2 else '>L', d, q)[0]
+            q += 2 if v == 2 else 4
+            if d[q + 2:q + 6] == want:
+                iid = i
+                break
+    if iid is None: return None
+    v, fl, q = full(d, iloc)
+    osz, lsz, bsz, isz = d[q] >> 4, d[q] & 15, d[q + 1] >> 4, (d[q + 1] & 15) if v in (1, 2) else 0
+    q += 2
+    cnt = int.from_bytes(d[q:q + (2 if v < 2 else 4)], 'big')
+    q += 2 if v < 2 else 4
+    def rd(size):
+        nonlocal q
+        x = int.from_bytes(d[q:q + size], 'big')
+        q += size
+        return x
+    for i in range(cnt):
+        item = rd(2 if v < 2 else 4)
+        method = rd(2) & 15 if v in (1, 2) else 0
+        rd(2)
+        base = rd(bsz)
+        ext = []
+        for e in range(rd(2)):
+            if isz: rd(isz)
+            eo = rd(osz)
+            ext.append((base + eo, rd(lsz)))
+        if item == iid: return b''.join(d[a:a + l] for a, l in ext) if method == 0 else None
+    return None
+
+def _qt_time(x):
+    """ 1904-01-01 ota eltelt masodperc (UTC) -> helyi ido """
     try:
-        return parse_mp4(data, debug, nal_check)
+        return plausible(utc_to_local(datetime.datetime(1904, 1, 1) + datetime.timedelta(seconds=x))) if x else None
+    except Exception:
+        return None
+
+def mp4_info(d, root):
+    """ visszaad: (brand, letrehozas, modositas, forras, szerzo, cim, program, eszkoz) """
+    ftyp = root.find(b'ftyp')
+    brand = d[ftyp.data:ftyp.data + 4].decode('latin1').strip() if ftyp else ""
+    created = modified = None
+    src_c = src_m = "mvhd"
+    tags = {}
+    exif = {}
+    try:
+        moov = root.find(b'moov')
+        mvhd = moov.find(b'mvhd') if moov else None
+        if mvhd:
+            v = d[mvhd.data]
+            c, m = unpack_from('>QQ' if v == 1 else '>LL', d, mvhd.data + 4)
+            created, modified = _qt_time(c), _qt_time(m)
+        def text(b, p, end):
+            b = d[p:end]
+            try: return b.decode('utf-8').strip('\x00 ')
+            except UnicodeDecodeError: return b.decode('latin1').strip('\x00 ')
+        def value(box):   # iTunes stilus: a box-ban egy 'data' box (tipus + locale + ertek)
+            if d[box.data + 4:box.data + 8] == b'data': return text(box, box.data + 16, min(box.data + int.from_bytes(d[box.data:box.data + 4], 'big'), box.end))
+            n = int.from_bytes(d[box.data:box.data + 2], 'big')   # QuickTime udta: hossz + nyelv + szoveg
+            return text(box, box.data + 4, min(box.data + 4 + n, box.end))
+        for parent in (moov, moov and moov.find(b'udta'), moov and moov.find(b'udta') and moov.find(b'udta').find(b'meta'), moov and moov.find(b'meta')):
+            if not parent: continue
+            ilst = parent.find(b'ilst') if parent.type == b'meta' else None
+            keys = []
+            if parent.type == b'meta' and parent.find(b'keys'):   # QuickTime metaadat: kulcs tabla + ilst (index -> ertek)
+                k = parent.find(b'keys')
+                q = k.data + 8
+                for i in range(int.from_bytes(d[k.data + 4:k.data + 8], 'big')):
+                    sz = int.from_bytes(d[q:q + 4], 'big')
+                    if sz < 8: break
+                    keys.append(d[q + 8:q + sz].decode('latin1'))
+                    q += sz
+            for b in (ilst.children if ilst else parent.children):
+                if b.type[0] == 0xA9:
+                    tags.setdefault(b.type[1:].decode('latin1'), value(b))
+                elif ilst and keys and 1 <= int.from_bytes(b.type, 'big') <= len(keys):
+                    tags.setdefault(keys[int.from_bytes(b.type, 'big') - 1], value(b))
+        meta = root.find(b'meta')
+        if meta:   # HEIF kep: EXIF elem (az elso 4 byte a TIFF fejlec eltolasa)
+            ex = _item_data(d, meta, b'Exif')
+            if ex and len(ex) > 4: exif = tiff_meta(ex[4 + int.from_bytes(ex[:4], 'big'):])
+            ispe = meta.find(b'iprp') and meta.find(b'iprp').find(b'ipco') and meta.find(b'iprp').find(b'ipco').find(b'ispe')
+            if ispe: exif.setdefault('dims', "%dx%d" % unpack_from('>LL', d, ispe.data + 4))
+    except Exception:
+        pass
+    g = lambda *names: next((tags[n] for n in names if tags.get(n)), "")
+    if exif.get('created'): created, src_c = exif['created'], "exif"
+    if exif.get('modified'): modified, src_m = exif['modified'], "exif"
+    # a felvetel ideje (iPhone: creationdate); az mvhd a (vago)program mentesi ideje is lehet
+    t = iso_local(g('com.apple.quicktime.creationdate'))
+    if t and not exif.get('created'): created, src_c = t, "meta"
+    if not created: created, src_c = iso_local(g('day')), "meta"
+    return (brand, created, modified, date_source(created, modified, src_c, src_m), exif.get('artist') or g('ART', 'aut', 'com.apple.quicktime.author'),
+            exif.get('title') or g('nam', 'com.apple.quicktime.title'), exif.get('software') or g('swr', 'too', 'com.apple.quicktime.software'),
+            device(exif.get('make') or g('mak', 'com.apple.quicktime.make'), exif.get('model') or g('mod', 'com.apple.quicktime.model')), exif.get('dims', ""))
+
+
+def testmp4(data, debug=False, nal_check=True, fname=None):
+    """
+    visszaad: hibapont (0 = jo). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent.
+    fname megadasa eseten kiir egy sort (grep -a -val CSV-be gyujtheto, lasd fileinfo.py):
+      MP4_INFO;filenev;brand;mp4|mov|heic;letrehozas;modositas;forras (mvhd|meta|exif);;szerzo;cim;program;eszkoz;OK|BAD
+    """
+    root = [None]
+    try:
+        res = parse_mp4(data, debug, nal_check, root)
     except Exception as e:
         print("ERROR! exception:", repr(e))
-        return 100
+        res = 100
+    if fname is not None:
+        i = mp4_info(data, root[0] or Box(b'root', 0, 0, len(data)))
+        print_info("MP4", (fname, i[0], mp4_kind(data) or "mp4") + i[1:4] + ("",) + i[4:8] + (result(res),))
+    return res
 
 
-def parse_mp4(d, debug, nal_check):
+def parse_mp4(d, debug, nal_check, rootref=[None]):
 
     def log(*args):
         if debug: print(*args)
 
     n = len(d)
-    root = Box(b'root', 0, 0, n)
+    root = rootref[0] = Box(b'root', 0, 0, n)
     # a file vegi nulla kitoltest (visszaallitas utan gyakori) levagjuk, figyelmeztetunk
     end = n
     err = parse_boxes(d, 0, end, root, log)
@@ -453,7 +575,7 @@ def parse_mp4(d, debug, nal_check):
         body = d.rstrip(b'\x00')
         if len(body) < n and not parse_boxes(d, 0, len(body), Box(b'root', 0, 0, len(body)), log):
             log("WARNING: %d zero bytes at end of file" % (n - len(body)))
-            root = Box(b'root', 0, 0, len(body))
+            root = rootref[0] = Box(b'root', 0, 0, len(body))
             parse_boxes(d, 0, len(body), root, log)
         else:
             print("ERROR! MP4: %s" % err)
@@ -506,5 +628,5 @@ if __name__ == "__main__":
     files = sys.argv[1:]
   for n in files:
     print("\n\n==================== %s ======================\n" % (os.path.basename(n)))
-    with open(n, "rb") as f: res = testmp4(f.read(), debug=True)
+    with open(n, "rb") as f: res = testmp4(f.read(), debug=True, fname=n)
     if res > 0: print("!!!HIBAS!!!", res)

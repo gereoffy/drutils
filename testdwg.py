@@ -12,6 +12,7 @@
 
 from struct import unpack_from, pack
 import datetime
+import re
 import zlib
 
 
@@ -557,7 +558,7 @@ def check_r2007(d, ver, log):
 # DWG_INFO: letrehozas / utolso mentes datuma, szerzo, utoljara mentette, cim (a visszaallitott fileok azonositasahoz)
 ###############################################################################################################################
 
-RELEASES = {"AC1006": "R10", "AC1009": "R11/R12", "AC1012": "R13", "AC1014": "R14", "AC1015": "R2000", "AC1018": "R2004",
+RELEASES = {"AC1001": "R2.2", "AC1002": "R2.5", "AC1003": "R2.6", "AC1004": "R9", "AC1006": "R10", "AC1009": "R11/R12", "AC1012": "R13", "AC1014": "R14", "AC1015": "R2000", "AC1018": "R2004",
             "AC1021": "R2007", "AC1024": "R2010", "AC1027": "R2013", "AC1032": "R2018"}
 
 class _Bits:
@@ -765,7 +766,7 @@ def testdwg(data, debug=False, fname=""):
         if err: print("ERROR! DWG %s: %s" % (ver, err))
         res = 10 if err else 0
     title, author, saved, created, modified = dwg_info(data, ver) if ver in checkers else ("",) * 5
-    def clean(x): return x.replace(";", ",").replace("\n", " ").replace("\r", " ").strip()
+    def clean(x): return re.sub(r'[\x00-\x1f\x7f\ufeff]+', ' ', str(x).replace(";", ",")).strip()
     print("DWG_INFO;" + ";".join(clean(x) for x in (fname, ver, RELEASES.get(ver, ""), created, modified, saved, author, title,
                                                   "OK" if res == 0 else "BAD" if res > 0 else "DUNNO")))
     return res
