@@ -11,6 +11,7 @@
 #   R2007         (AC1021): Reed-Solomon kodolt file header, page map/section map, adat oldalak RS paritasa
 
 from struct import unpack_from, pack
+import datetime
 import zlib
 
 
@@ -552,11 +553,201 @@ def check_r2007(d, ver, log):
 
 ###############################################################################################################################
 
+###############################################################################################################################
+# DWG_INFO: letrehozas / utolso mentes datuma, szerzo, utoljara mentette, cim (a visszaallitott fileok azonositasahoz)
+###############################################################################################################################
+
+RELEASES = {"AC1006": "R10", "AC1009": "R11/R12", "AC1012": "R13", "AC1014": "R14", "AC1015": "R2000", "AC1018": "R2004",
+            "AC1021": "R2007", "AC1024": "R2010", "AC1027": "R2013", "AC1032": "R2018"}
+
+class _Bits:
+    """ a R13+ bitfolyam olvasoja (B, BS, BL, BD, TV, H tipusok) """
+    def __init__(self, d, p):
+        self.d = d
+        self.bit = p * 8
+    def b(self):
+        v = (self.d[self.bit >> 3] >> (7 - (self.bit & 7))) & 1
+        self.bit += 1
+        return v
+    def bits(self, n):
+        v = 0
+        for _ in range(n): v = (v << 1) | self.b()
+        return v
+    def raw(self, n): return bytes(self.bits(8) for _ in range(n))
+    def BS(self):
+        c = self.bits(2)
+        return unpack_from('<H', self.raw(2))[0] if c == 0 else self.bits(8) if c == 1 else 0 if c == 2 else 256
+    def BL(self):
+        c = self.bits(2)
+        return unpack_from('<L', self.raw(4))[0] if c == 0 else self.bits(8) if c == 1 else 0
+    def BD(self):
+        c = self.bits(2)
+        if c == 0: self.raw(8)
+    def TV(self): return self.raw(self.BS())
+    def H(self):
+        self.bits(4)
+        self.raw(self.bits(4))
+
+def _julian(day, ms):
+    """ Julian nap + ezredmasodperc -> 'YYYY-MM-DD HH:MM:SS', ertelmetlen erteknel '' """
+    try:
+        if not 2440588 - 36525 < day < 2440588 + 36525 or not 0 <= ms < 86400000: return ""
+        return (datetime.datetime(1970, 1, 1) + datetime.timedelta(days=day - 2440588, milliseconds=ms)).strftime('%Y-%m-%d %H:%M:%S')
+    except Exception:
+        return ""
+
+def _header_dates(h, p, ver):
+    """ a header valtozok bitfolyamabol a TDCREATE/TDUPDATE (R13-R2004). p: a bitfolyam eleje (byte) """
+    r = _Bits(h, p)
+    r13_14 = ver in ("AC1012", "AC1014")
+    r2004 = ver == "AC1018"
+    for _ in range(4): r.BD()
+    for _ in range(4): r.TV()
+    r.BL(); r.BL()
+    if r13_14: r.BS()
+    if not r2004: r.H()                          # current viewport entity header
+    nb = 2 + 7 + 4 + 2 + 3 + 2                   # DIMASO..LIMCHECK, USRTIMER..SPLFRAME, MIRRTEXT, WORLDVIEW, TILEMODE.., DISPSILH, PELLIPSE
+    if r13_14: nb += 1 + 1 + 2 + 1 + 1           # DIMSAV, BLIPMODE, ATTREQ/ATTDIA, WIREFRAME, DELOBJ
+    if r2004: nb += 1
+    for _ in range(nb): r.b()
+    r.BS()                                       # PROXYGRAPHICS
+    if r13_14: r.BS()                            # DRAGMODE
+    for _ in range(5): r.BS()                    # TREEDEPTH LUNITS LUPREC AUNITS AUPREC
+    if r13_14: r.BS()                            # OSMODE
+    r.BS()                                       # ATTMODE
+    if r13_14: r.BS()                            # COORDS
+    r.BS()                                       # PDMODE
+    if r13_14: r.BS()                            # PICKSTYLE
+    if r2004: r.BL(); r.BL(); r.BL()
+    for _ in range(5 + 14): r.BS()               # USERI1-5, SPLINESEGS..TEXTQLTY
+    for _ in range(9 + 5 + 4 + 3): r.BD()        # LTSCALE..PLINEWID, USERR1-5, CHAMFERA-D, FACETRES CMLSCALE CELTSCALE
+    r.TV()                                       # MENUNAME
+    c = (r.BL(), r.BL())
+    u = (r.BL(), r.BL())
+    return _julian(*c), _julian(*u)
+
+def _parse_summaryinfo(si, unicode):
+    """ AcDb:SummaryInfo: 8 szoveg (cim, targy, szerzo, kulcsszavak, megjegyzes, utoljara mentette, revizio, hyperlink),
+        utana TDINDWG, TDCREATE, TDUPDATE (nap + ms). visszaad: (cim, szerzo, utoljara mentette, letrehozas, modositas) """
+    p = 0
+    strs = []
+    for i in range(8):
+        n, = unpack_from('<H', si, p)
+        p += 2
+        raw = si[p:p + (2 * n if unicode else n)]
+        p += 2 * n if unicode else n
+        strs.append(raw.decode('utf-16le' if unicode else 'cp1250', 'replace').rstrip('\0'))
+    t = unpack_from('<6L', si, p)
+    return strs[0], strs[2], strs[5], _julian(t[2], t[3]), _julian(t[4], t[5])
+
+def _r2004_section(d, secname):
+    """ egy R2004+ (nem R2007) szakasz kitomoritett tartalma, vagy None """
+    h = bytes(x ^ y for x, y in zip(d[0x80:0x80 + 0x6C], R2004_HDR_KEY))
+    pmaddr, = unpack_from('<Q', h, 0x54)
+    smid, = unpack_from('<L', h, 0x5C)
+    pm = _r2004_system_page(d, pmaddr + 0x100, 0x41630E3B)
+    pages = {}
+    addr = 0x100
+    q = 0
+    while q + 8 <= len(pm):
+        num, size = unpack_from('<lL', pm, q)
+        q += 8
+        if num < 0: q += 16
+        else: pages[num] = addr
+        addr += size
+    sm = _r2004_system_page(d, pages[smid], 0x4163003B)
+    nsec, = unpack_from('<L', sm, 0)
+    q = 20
+    for i in range(nsec):
+        size, pc, maxd, unk, comp, sid, enc = unpack_from('<QLLLLLL', sm, q)
+        name = sm[q + 32:q + 96].split(b'\0')[0].decode('latin1')
+        q += 96
+        plist = [unpack_from('<LLQ', sm, q + 16 * j) for j in range(pc)]
+        q += 16 * pc
+        if name != secname: continue
+        out = bytearray()
+        for pn, dsz, so in plist:
+            a = pages[pn]
+            m = 0x4164536B ^ a
+            ph = [v ^ m for v in unpack_from('<8L', d, a)]
+            data = d[a + 32:a + 32 + ph[2]]
+            out += decompress_r2004(data, maxd) if comp == 2 else data
+        return bytes(out[:size])
+    return None
+
+def _r2007_section(d, secname):
+    """ egy R2007 szakasz tartalma, vagy None """
+    global _rs_system, _rs_data
+    if _rs_system is None:
+        _rs_system = _rs_parity_func(0x169, 16)
+        _rs_data = _rs_parity_func(0x11D, 4)
+    data, bad = rs_check(d[0x80:0x80 + 765], 3, 239, _rs_system)
+    clen, = unpack_from('<l', data, 24)
+    H = unpack_from('<34Q', decompress_r2007(data[32:32 + clen], 0x110) if clen > 0 else data[32:32 + 0x110], 0)
+    pm = _r2007_system_page(d, 0x480 + H[7], H[10], H[11], H[3])
+    pages = {}
+    off = 0
+    for i in range(0, len(pm) - 15, 16):
+        size, pid = unpack_from('<qq', pm, i)
+        pages[abs(pid)] = (off, size)
+        off += size
+    sm = _r2007_system_page(d, 0x480 + pages[H[24]][0], H[22], H[25], H[27])
+    q = 0
+    while q + 64 <= len(sm):
+        dsz, maxs, enc, hsh, nlen, unk, encoded, pc = unpack_from('<8Q', sm, q)
+        q += 64
+        name = sm[q:q + nlen].decode('utf-16le', 'replace').rstrip('\0')
+        q += nlen
+        plist = [unpack_from('<7Q', sm, q + 56 * k) for k in range(pc)]
+        q += 56 * pc
+        if name != secname: continue
+        out = bytearray()
+        for poff, psz, pid, usz, csz, cks, crc in plist:
+            a, size = pages[pid]
+            a += 0x480
+            if encoded == 4:
+                nb = size // 255
+                raw, _ = rs_check(d[a:a + nb * 255], nb, 251, _rs_data)
+            else:
+                raw = d[a:a + size]
+            out += decompress_r2007(raw[:csz], usz) if csz < usz else raw[:usz]
+        return bytes(out[:dsz])
+    return None
+
+def dwg_info(d, ver):
+    """ visszaad: (cim, szerzo, utoljara mentette, letrehozas, modositas). Sosem dob kivetelt, az ismeretlen mezo ''. """
+    title = author = saved = created = modified = ""
+    try:
+        if ver in ("AC1006", "AC1009"):          # R10-R12: fix helyen, nap + ms parok
+            c, cm, u, um = unpack_from('<4l', d, 0x31F)
+            created, modified = _julian(c, cm), _julian(u, um)
+        elif ver in ("AC1012", "AC1014", "AC1015"):
+            nrec, = unpack_from('<l', d, 0x15)
+            seek = unpack_from('<Bll', d, 0x19)[1]
+            created, modified = _header_dates(d, seek + 20, ver)
+        elif ver == "AC1021":
+            si = _r2007_section(d, "AcDb:SummaryInfo")
+            if si: title, author, saved, created, modified = _parse_summaryinfo(si, True)
+        else:
+            si = _r2004_section(d, "AcDb:SummaryInfo")
+            if si: title, author, saved, created, modified = _parse_summaryinfo(si, ver != "AC1018")
+            elif ver == "AC1018":                # nehany R2004-es filebol hianyzik a SummaryInfo: a header valtozokbol
+                h = _r2004_section(d, "AcDb:Header")
+                if h: created, modified = _header_dates(h, 20, ver)
+    except Exception:
+        pass
+    return title, author, saved, created, modified
+
+
 checkers = {"AC1006": check_r12, "AC1009": check_r12, "AC1012": check_r2000, "AC1014": check_r2000, "AC1015": check_r2000,
             "AC1018": check_r2004, "AC1024": check_r2004, "AC1027": check_r2004, "AC1032": check_r2004, "AC1021": check_r2007}
 
-def testdwg(data, debug=False):
-    """ visszaad: hibapont (0 = jo, -1 = nem tamogatott verzio). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent. """
+def testdwg(data, debug=False, fname=""):
+    """
+    visszaad: hibapont (0 = jo, -1 = nem tamogatott verzio). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent.
+    Minden filerol kiir egy sort (grep-pel CSV-be gyujtheto):
+      DWG_INFO;filenev;verzio;release;letrehozas;utolso mentes;utoljara mentette;szerzo;cim;OK|BAD|DUNNO
+    """
 
     def log(*args):
         if debug: print(*args)
@@ -565,15 +756,19 @@ def testdwg(data, debug=False):
     log("DWG: version %s, %d bytes" % (ver, len(data)))
     if ver not in checkers:
         log("WARNING: DWG version %s not supported" % ver)
-        return -1
-    try:
-        err = checkers[ver](data, ver, log)
-    except Exception as e:
-        err = "exception: %r" % e
-    if err:
-        print("ERROR! DWG %s: %s" % (ver, err))
-        return 10
-    return 0
+        res = -1
+    else:
+        try:
+            err = checkers[ver](data, ver, log)
+        except Exception as e:
+            err = "exception: %r" % e
+        if err: print("ERROR! DWG %s: %s" % (ver, err))
+        res = 10 if err else 0
+    title, author, saved, created, modified = dwg_info(data, ver) if ver in checkers else ("",) * 5
+    def clean(x): return x.replace(";", ",").replace("\n", " ").replace("\r", " ").strip()
+    print("DWG_INFO;" + ";".join(clean(x) for x in (fname, ver, RELEASES.get(ver, ""), created, modified, saved, author, title,
+                                                  "OK" if res == 0 else "BAD" if res > 0 else "DUNNO")))
+    return res
 
 
 if __name__ == "__main__":
@@ -585,5 +780,5 @@ if __name__ == "__main__":
     files = sys.argv[1:]
   for n in files:
     print("\n\n==================== %s ======================\n" % (os.path.basename(n)))
-    with open(n, "rb") as f: res = testdwg(f.read(), debug=True)
+    with open(n, "rb") as f: res = testdwg(f.read(), debug=True, fname=n)
     if res > 0: print("!!!HIBAS!!!", res)
