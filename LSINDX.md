@@ -63,13 +63,16 @@ lásd a 7. lépést.
 
 ### Beállítás
 
-A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-18](lsindx.py:10)):
+A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-22](lsindx.py:10)):
 
 | Változó | Alapérték | Jelentés |
 |---|---|---|
 | `BLKSIZE` | `4096` | Klaszterméret (és az `INDX` blokkméret) bájtban. |
 | `MFTSIZE` | `1024` | MFT-rekord mérete. |
-| `SCANCHUNK` | 1 MiB | Egyszerre ennyit olvas az eszközről. A `BLKSIZE` többszöröse legyen. |
+| `SCANPROGRESS` / `SCANLINE` | 1 GiB / 64 | Ennyi bájtonként egy progress karakter, ennyi karakterenként új sor. |
+| `SCANCHUNK` | 1 MiB | Egyszerre ennyit olvas az eszközről. 512 többszöröse, és nagyobb, mint `SCANMAXREC`. |
+| `SCANALIGN` | 512 | Ekkora igazítással keresi a rekordokat. |
+| `SCANMAXREC` | 64 KiB | Legnagyobb elfogadott rekordméret. Ennyi átfedéssel olvas, hogy a blokkhatáron átlógó rekordok is meglegyenek. |
 | `SCANCHECKPOINT` | 1 GiB | Ennyi olvasás után menti a folytatáshoz szükséges állapotot. |
 | `SCANFILE` | `SCAN.dat` | A megtalált `FILE`/`INDX` rekordok nyers másolata. |
 | `SCANPOS` | `SCAN.pos` | A szkennelés állapota (JSON): eszköz, meddig jutott, mekkora ekkor a `SCAN.dat`. |
@@ -97,10 +100,25 @@ A két kapcsoló együtt is megadható, de a javasolt menet az, hogy előbb csak
 futtatod, **ellenőrzöd a mentést**, és csak utána, külön futással jön a
 `--delete-from-device`. A törlés nem másol újra semmit, és a másolatokat sem ellenőrzi.
 
-**1. Szkennelés** – a lemezt **egyetlen menetben**, 1 MiB-os blokkokban olvassa végig. Minden
-blokkban megkeresi a 1024 bájtra igazított `FILE` és a 4096 bájtra igazított `INDX`
-rekordokat, és ezeket nyersen hozzáírja a `SCAN.dat`-hoz, rekordonként így:
-`pozíció (8 bájt) + méret (4 bájt) + adat`. A haladást a hibakimenetre írja:
+**1. Szkennelés** (`scan_device`, [lsindx.py:244](lsindx.py:244)) – a lemezt **egyetlen
+menetben**, 1 MiB-os blokkokban olvassa végig. Minden blokkban megkeresi az 512 bájtra
+igazított rekordokat:
+
+- **`FILE`** (MFT-rekord): a méretét a headerből veszi (a 28-as offseten lévő „allocated size”);
+- **`INDX`** (könyvtár-indexblokk): a méretet szintén a headerből veszi (az index node header
+  „allocated size” mezője + 24 bájt fejléc);
+- **NTFS boot szektor** (a 3. bájttól `NTFS    `): 512 bájt. Ez az első és a tartalék boot
+  szektort is megtalálja, amelyek a partíció elején és utolsó szektorában vannak.
+
+Ha a headerben lévő méret értelmetlen (nem 2 hatványa 512 és 64 KiB között), az alapértelmezett
+méretet használja: 1024 bájtot a `FILE`, 4096 bájtot az `INDX` rekordhoz. A blokkokat
+64 KiB átfedéssel olvassa, így a blokk végén kezdődő, átlógó rekordok is teljes egészükben
+bekerülnek. A lemez legvégén csonkán maradt rekord kimarad.
+
+Minden rekordot nyersen hozzáír a `SCAN.dat`-hoz, rekordonként így:
+`pozíció (8 bájt) + méret (4 bájt) + adat`. A keresés így nem függ a klaszter- és
+rekordmérettől, és a partíció kezdetétől sem. A lemezt ezért elég **egyszer** végigolvasni,
+ezekkel az értékekkel utána a feldolgozásnál lehet kísérletezni.
 
 ```bash
 mkdir mentes && cd mentes
@@ -110,9 +128,25 @@ mkdir mentes && cd mentes
 sudo pypy3 ../lsindx.py --scandisk /dev/sdX
 ```
 
+A haladást az stdout-ra írja, gigabájtonként egy karakterrel:
+
+| Karakter | Jelentés az adott GB-ban |
+|---|---|
+| `M` | volt benne MFT-rekord (`FILE`) |
+| `I` | csak INDX-rekord volt benne |
+| `.` | van benne adat, de nem talált rekordot |
+| `0` | csupa nulla |
+
+64 karakterenként új sort kezd, amelynek elején a pozíció áll GB-ban. A sor végére a
+haladást, a sebességet és az addig talált rekordok számát írja:
+
 ```
-SCAN: 1024/3815447 MB (0.0%)  180 MB/s  FILE=12 INDX=340
+       0 GB 00000000000000000000000000000000.....I..I...I.....M..I..I..I....  64/3726 GB  182 MB/s  FILE=40 INDX=1201 NTFS=0
+      64 GB ..I...I......I...II....I..........I.......I...................  128/3726 GB  181 MB/s  FILE=40 INDX=2533 NTFS=0
 ```
+
+A karakterenkénti méret és a sor hossza a `SCANPROGRESS` és a `SCANLINE` konstanssal
+állítható. A hibakimenetre csak a folytatás és a befejezés üzenete kerül.
 
 Gigabájtonként menti a `SCAN.pos`-t. Ha a futás megszakad (Ctrl+C, áramszünet, leválasztott
 lemez), ugyanezzel a paranccsal onnan folytatja, ahol az utolsó mentés volt. Az utána írt,
@@ -171,9 +205,23 @@ csak olvassa, de a lemezt így is óvni kell:
 
 ### Működés lépésenként
 
-A szkennelés (`scan_device`, [lsindx.py:230](lsindx.py:230)) után a feldolgozás így halad:
+A szkennelés után a feldolgozás így halad:
 
-**1. MFT-rekordok feldolgozása** ([lsindx.py:295-297](lsindx.py:295)) – a `SCAN.dat` minden
+**0. Boot szektorok** ([lsindx.py:336](lsindx.py:336)) – a `SCAN.dat`-ban talált összes NTFS
+boot szektor adatait kiírja: szektorméret, klaszterméret, MFT- és INDX-rekordméret, kötetméret,
+az MFT klaszterszáma, valamint a belőle adódó `part_start`. Ez utóbbi a boot szektor
+pozíciója, ha az első boot szektorról van szó. Ha a tartalékról, akkor a pozíció mínusz a
+kötet mérete.
+
+```
+BOOT at 0xC800200: sector=512 cluster=4096 MFTrec=1024 INDXrec=4096 volume=184 MB MFT@LCN 786432  =>  part_start=0xC800200 (ha elso)  / 0x1000000 (ha tartalek)
+```
+
+Ha a lemez eleje hiányzik, a tartalék boot szektorból derül ki a `BLKSIZE`, a `MFTSIZE` és a
+`part_start`, amelyeket a szkript elején kell beállítani. Ezekhez a feldolgozás újrafuttatása
+elég, a lemezt nem kell újra szkennelni.
+
+**1. MFT-rekordok feldolgozása** ([lsindx.py:347-349](lsindx.py:347)) – a `SCAN.dat` minden
 `FILE` rekordját feldolgozza (`parse_MFT`):
 
 - Ellenőrzi a méreteket, és elvégzi a *fixup* (update sequence) javítást: az NTFS minden
@@ -190,7 +238,7 @@ A szkennelés (`scan_device`, [lsindx.py:230](lsindx.py:230)) után a feldolgoz�
 - A fájlok a `filedata[méret]` listába, a könyvtárak a `dirlist[MFT#] = (név, szülő)`
   szótárba kerülnek.
 
-**2. INDX blokkok feldolgozása** ([lsindx.py:299-301](lsindx.py:299)) – a `SCAN.dat`
+**2. INDX blokkok feldolgozása** ([lsindx.py:351-353](lsindx.py:351)) – a `SCAN.dat`
 minden `INDX` rekordját feldolgozza (`parseindx`):
 
 - Fixup-javítás mind a 8 szektorra; hiba esetén „CRC error!” és a blokk kimarad.
@@ -212,26 +260,26 @@ minden `INDX` rekordját feldolgozza (`parseindx`):
   Ez az `offs` a `part_start` helyes értéke. Érdemes először egy próbafutással ezt
   kideríteni, beállítani, és csak utána futtatni élesben.
 
-**3. Könyvtárfa felépítése** ([lsindx.py:307-323](lsindx.py:307)) – `get_path` a szülő-láncot
+**3. Könyvtárfa felépítése** ([lsindx.py:359-375](lsindx.py:359)) – `get_path` a szülő-láncot
 a gyökérig (MFT#5, amelynek neve `.`) követi, és `os.makedirs`-szel létrehozza. Ha a lánc egy
 ismeretlen könyvtárnál megszakad, annak helyén `dir__<MFT#>` nevű mappa jön létre.
 
-**4. Fájllista** ([lsindx.py:325-328](lsindx.py:325)) – az 1024 bájtnál nagyobb fájlokat
+**4. Fájllista** ([lsindx.py:377-380](lsindx.py:377)) – az 1024 bájtnál nagyobb fájlokat
 méret szerint rendezve kiírja a logba:
 
 ```
 <méret> <unix idő> <fájl MFT#>/<szülő MFT#> "<útvonal/név>"
 ```
 
-**5. `INDEX.pck` mentése** ([lsindx.py:330-334](lsindx.py:330)) – előtte a kis fájlok
+**5. `INDEX.pck` mentése** ([lsindx.py:382-386](lsindx.py:382)) – előtte a kis fájlok
 szülőkönyvtáraihoz is létrehozza az útvonalat, lásd lent.
 
-**6. Visszamásolás** – csak `--restore` esetén ([lsindx.py:344](lsindx.py:344)). A
+**6. Visszamásolás** – csak `--restore` esetén ([lsindx.py:391](lsindx.py:391)). A
 `SCAN.pos`-ban tárolt eszközt nyitja meg, csak olvasásra. Az `mftfiles` fájljait a
 run-listájuk alapján kimásolja a helyükre, a méretre vágja, és beállítja a módosítási időt.
 Log: `COPY <bájt> bytes to <útvonal>  (<n> runs)`.
 
-**7. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:358](lsindx.py:358)).
+**7. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:405](lsindx.py:405)).
 Az összes MFT alapján visszaállítható fájl klasztereit nullákkal felülírja az eszközön (a
 sparse futásokat kihagyja). Log: `DELETE <bájt> bytes of <útvonal>`.
 
@@ -257,11 +305,10 @@ Az `INDEX.pck`-t az [indxrename.py](#indxrenamepy) használja fel.
 
 ### Ismert korlátok (lsindx.py)
 
-- Csak 1024 bájtos MFT-rekordot, 4096 bájtos klasztert és INDX blokkot kezel.
-- Az INDX blokkokat 4096 bájtra igazítva keresi az image elejétől, tehát ha a partíció
-  kezdete nem 4096 többszöröse, a blokkok nem találhatók meg – ilyenkor érdemes előbb a
-  partíciót kivágni az image-ből.
-- Az MFT-rekordoknál 2 szektoros fixup-ot feltételez.
+- A szkennelés tetszőleges (512 és 64 KiB közötti) rekordméretet és 512 bájtra igazított
+  partíciókezdetet kezel. A feldolgozás viszont a `MFTSIZE`-nál eltérő méretű MFT-rekordokat
+  eldobja, és a fixup-javításnál 512 bájtos szektort feltételez. Az MFT-rekordoknál
+  ráadásul pontosan 2 szektort. Más értékeknél ezeket a kódban kell átállítani.
 - A tömörített, töredezett (attribútumlistás) és sparse fájlokat nem másolja vissza
   közvetlenül; ezeket a nyers szkennelésnek kell megtalálnia (vagy az
   [lstree.py](LSTREE.md)-nak, ha van használható `$MFT`). A sparse futásokat (0-s pozíció) a másolás nullákkal tölti ki, a

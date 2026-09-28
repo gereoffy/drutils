@@ -10,9 +10,13 @@ import pickle
 BLKSIZE=4096
 MFTSIZE=1024
 
-SCANCHUNK=1024*1024          # egyszerre ennyit olvas az eszkozrol (BLKSIZE tobbszorose legyen!)
+SCANCHUNK=1024*1024          # egyszerre ennyit olvas az eszkozrol (512 tobbszorose, es nagyobb mint SCANMAXREC!)
+SCANPROGRESS=1024*1024*1024  # ennyi byte-onkent egy progress karakter az stdout-ra (M=mft I=indx 0=ures .=egyeb)
+SCANLINE=64                  # ennyi progress karakter utan uj sor (statisztikaval)
+SCANALIGN=512                # a FILE/INDX/NTFS rekordokat ennyire igazitva keresi
+SCANMAXREC=65536             # legnagyobb elfogadott rekordmeret, ennyi atfedessel olvas (blokkhataron atlogo rekordok)
 SCANCHECKPOINT=1024*1024*1024 # ennyi olvasas utan menti a folytatashoz szukseges allapotot
-SCANFILE="SCAN.dat"          # a talalt FILE/INDX rekordok nyersen: fpos(8)+meret(4)+data
+SCANFILE="SCAN.dat"          # a talalt FILE/INDX/boot rekordok nyersen: fpos(8)+meret(4)+data
 SCANPOS="SCAN.pos"           # checkpoint (json): meddig jutott a scan, es mekkora volt ekkor a SCANFILE
 
 part_start=0 #0x7000+0xE00 #63*512
@@ -230,8 +234,15 @@ def save_scanpos(st):
     with open(SCANPOS+".tmp","w") as fp: json.dump(st,fp)
     os.replace(SCANPOS+".tmp",SCANPOS) # atomi csere, hogy megszakadaskor se legyen felig irt checkpoint
 
+def recsize(buf,i,sig):
+    # a rekord merete a sajat headerebol (ha ertelmetlen, az alapertelmezett meret)
+    if sig==b'FILE': n=int.from_bytes(buf[i+28:i+32],"little") ; default=1024     # allocated entry size
+    elif sig==b'INDX': n=int.from_bytes(buf[i+32:i+36],"little")+24 ; default=4096 # allocated index node size + 24 byte header
+    else: return 512 # boot sector
+    return n if SCANALIGN<=n<=SCANMAXREC and n&(n-1)==0 else default
+
 def scan_device(device):
-    assert SCANCHUNK%BLKSIZE==0 and BLKSIZE%MFTSIZE==0 # igy egy rekord sosem log at a kovetkezo blokkba
+    assert SCANCHUNK%SCANALIGN==0 and SCANCHUNK>SCANMAXREC
     device=os.path.abspath(device)
     st=load_scanpos(device)
     if st["done"]: print("SCAN: %s mar kesz (%s)."%(SCANFILE,device),file=sys.stderr) ; return
@@ -242,33 +253,58 @@ def scan_device(device):
     out=open(SCANFILE,"ab")
     out.truncate(st["outsize"])  # az utolso checkpoint utan irt (esetleg felig kiirt) rekordok eldobasa
     out.seek(st["outsize"])
-    fpos=st["pos"]
-    if fpos: print("SCAN: resume at 0x%X (%d MB)"%(fpos,fpos>>20),file=sys.stderr)
-    f.seek(fpos)
-    lastcp=fpos
-    t0=time.time() ; p0=fpos
-    nfile=nindx=0
+    base=st["pos"]  # a buf elejenek pozicioja az eszkozon; minden ennel elorebb kezdodo rekord mar fel van dolgozva
+    if base: print("SCAN: resume at 0x%X (%d MB)"%(base,base>>20),file=sys.stderr)
+    f.seek(base)
+    buf=b''
+    lastcp=base
+    t0=time.time() ; p0=base
+    cnt={b'FILE':0,b'INDX':0,b'NTFS':0}
+    marks={}                  # progress: GB index -> "M"/"I"/"." (ami nincs benne, az csupa 0 volt)
+    shown=sgb=base//SCANPROGRESS  # a kovetkezo kiirando progress karakter GB indexe (sgb: ahonnan most indultunk)
+    rpos=base                 # olvasasi pozicio
+    zero=bytes(SCANCHUNK)
+    def progress(upto):
+        nonlocal shown
+        while shown<upto:
+            if (shown-sgb)%SCANLINE==0: sys.stdout.write("%8d GB "%(shown*SCANPROGRESS>>30))
+            sys.stdout.write(marks.pop(shown,"0"))
+            shown+=1
+            if (shown-sgb)%SCANLINE==0 or shown*SCANPROGRESS>=devsize:
+                dt=time.time()-t0
+                sys.stdout.write("  %d/%d GB  %.0f MB/s  FILE=%d INDX=%d NTFS=%d\n"%(min(shown*SCANPROGRESS,devsize)>>30,devsize>>30,
+                    (min(shown*SCANPROGRESS,devsize)-p0)/(1<<20)/max(dt,0.001),cnt[b'FILE'],cnt[b'INDX'],cnt[b'NTFS']))
+        sys.stdout.flush()
     while True:
         data=f.read(SCANCHUNK)
-        n=len(data)-len(data)%MFTSIZE # csak teljes rekordok (mint regen: a vegen levo csonka blokk kimarad)
-        for sig,rsize in ((b'FILE',MFTSIZE),(b'INDX',BLKSIZE)):
-            i=data.find(sig)
-            while 0<=i and i+rsize<=n:
-                if i%rsize==0:
-                    out.write(struct.pack("<QI",fpos+i,rsize)) ; out.write(data[i:i+rsize])
-                    if rsize==MFTSIZE: nfile+=1
-                    else: nindx+=1
-                i=data.find(sig,i+1)
-        fpos+=len(data)
         eof=len(data)<SCANCHUNK
-        if eof or fpos-lastcp>=SCANCHECKPOINT:
+        if data!=zero[:len(data)]: # nem ures blokk: a nem ures reszet tartalmazo GB-ok legalabb "."
+            for g in range(rpos//SCANPROGRESS,(rpos+len(data)-1)//SCANPROGRESS+1):
+                seg=data[max(g*SCANPROGRESS-rpos,0):(g+1)*SCANPROGRESS-rpos]
+                if seg!=zero[:len(seg)]: marks.setdefault(g,".")
+        rpos+=len(data)
+        buf+=data  # az elozo korbol atvett atfedes + az uj blokk
+        limit=len(buf) if eof else len(buf)-SCANMAXREC  # csak az ez elott kezdodo rekordokat nezzuk, a tobbi a kovetkezo korre marad
+        for sig,so in ((b'FILE',0),(b'INDX',0),(b'NTFS    ',3)):  # boot sector: "NTFS    " a 3. bajttol
+            i=buf.find(sig,so)
+            while 0<=i and i-so<limit:
+                j=i-so
+                if j%SCANALIGN==0:
+                    n=recsize(buf,j,sig[:4])
+                    if j+n<=len(buf): # csak a lemez vegen csonka rekord marad ki
+                        out.write(struct.pack("<QI",base+j,n)) ; out.write(buf[j:j+n])
+                        cnt[sig[:4]]+=1
+                        g=(base+j)//SCANPROGRESS
+                        if sig==b'FILE': marks[g]="M"
+                        elif sig==b'INDX' and marks.get(g)!="M": marks[g]="I"
+                i=buf.find(sig,i+1)
+        buf=buf[limit:] ; base+=limit
+        progress((devsize+SCANPROGRESS-1)//SCANPROGRESS if eof else base//SCANPROGRESS) # a base elotti GB-ok mar keszek
+        if eof or base-lastcp>=SCANCHECKPOINT:
             out.flush() ; os.fsync(out.fileno())
-            st.update(pos=fpos,outsize=out.tell(),done=eof)
+            st.update(pos=base,outsize=out.tell(),done=eof)
             save_scanpos(st)
-            lastcp=fpos
-            dt=time.time()-t0
-            print("SCAN: %d/%d MB (%.1f%%)  %.0f MB/s  FILE=%d INDX=%d"%(fpos>>20,devsize>>20,100.0*fpos/max(devsize,1),
-                  (fpos-p0)/(1<<20)/max(dt,0.001),nfile,nindx),file=sys.stderr)
+            lastcp=base
         if eof: break
     out.close()
     f.close()
@@ -296,6 +332,17 @@ if not st or not os.path.exists(SCANFILE):
 if not st["done"]:
     sys.exit("A %s meg nem teljes (%d MB-ig jutott). Folytatas:\n  %s --scandisk %s"%(SCANFILE,st["pos"]>>20,sys.argv[0],st["device"]))
 device=st["device"]
+
+# NTFS boot sectorok (az elso a particio elejen, a tartalek a particio utolso szektoraban):
+for fpos,data in read_scanfile():
+    if data[3:11]!=b'NTFS    ': continue
+    def getint(i,l): return int.from_bytes(data[i:i+l],byteorder="little",signed=False)
+    def recsz(x,clu): return clu*x if x<128 else 1<<(256-x)  # pozitiv: klaszterben, negativ: 2^-x bajt
+    bps=getint(11,2) ; spc=getint(13,1) ; spc=spc if spc<=128 else 1<<(256-spc)
+    total=getint(40,8) ; clu=bps*spc
+    print("BOOT at 0x%X: sector=%d cluster=%d MFTrec=%d INDXrec=%d volume=%d MB MFT@LCN %d  =>  part_start=0x%X (ha elso)"%(
+        fpos,bps,clu,recsz(getint(64,1),clu),recsz(getint(68,1),clu),total*bps>>20,getint(48,8),fpos),
+        " / 0x%X (ha tartalek)"%(fpos-total*bps) if fpos>=total*bps else "")
 
 # find FILE (MFT) entries:
 for fpos,data in read_scanfile():
