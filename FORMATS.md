@@ -236,6 +236,16 @@ PNG képeket (OfficeArt BLIP) kivágja, és a `testjpeg`-gel / `testpng`-vel ell
   órára egyezik a fájl mtime-jával.
 - Ha a fájl a megnyitáskor hibás, a metaadatokat engedékeny módban olvassa újra, így sérült fájlból is kijön,
   amennyi kiolvasható.
+- **Megengedő mód más programoknak** (pl. heurisztikus vírusellenőrzés): `OleFile(data, strict=False)`.
+  - Csak akkor dob kivételt, ha a fájl nem OLE. Minden más hiba az `issues` listába kerül, és a sérült fájlból is
+    kiolvassa, amit lehet (`listdir()`, `exists()`, `openstream()`).
+  - Szándékosan rosszindulatú fájlok ellen is védett:
+    - a szektorláncokban figyeli a ciklusokat,
+    - egy lánc nem lehet hosszabb a FAT-nál,
+    - a hibás vagy óriási FAT/DIFAT-méreteket a fájl méretére vágja,
+    - az összes kiolvasott adat mennyisége a fájlmérettel arányos, így az egymásra mutató streamekkel sem lehet
+      memóriát vagy időt elfogyasztani.
+  - A `testole` saját ellenőrzése a szigorú módot (`strict=True`, alapértelmezett) használja.
 
 ## SPSS .sav / .zsav (`testsav.py`)
 

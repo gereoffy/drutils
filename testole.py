@@ -30,7 +30,9 @@ def ShortXLUnicodeString(data, isBIFF8):
 ###############################################################################################################################
 # OLE2 (Compound File Binary, MS-CFB) olvaso, kulso konyvtar nelkul. Az olefile ellenorzeseit koveti: a hibak kivetelt
 # dobnak (strict), az iroi furcsasagok (pl. szemet a stream meret felso 32 bitjeben) csak az issues listaba kerulnek.
-# strict=False: semmi nem dob kivetelt, amit lehet, kiolvas (a metaadatokhoz serult fileokbol is).
+# strict=False: megengedo parser (pl. virusellenorzeshez): semmi nem dob kivetelt (csak a nem OLE file), minden hiba az
+# issues listaba kerul, es amit lehet, kiolvas a serult fileokbol is. A hibas meretek / ciklikus lancok ellen vedett
+# (a beolvasott adat merete a file meretevel aranyos).
 ###############################################################################################################################
 
 OLE_MAGIC = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
@@ -59,6 +61,8 @@ class OleFile:
 
     def __init__(self, d, strict=True):
         self.d = d
+        self.strict = strict
+        self.read_budget = 8 * len(d) + (16 << 20)   # megengedo modban osszesen ennyi byte olvashato a lancokbol (DoS vedelem)
         self.raise_level = INCORRECT if strict else FATAL + 1
         self.issues = []            # a nem hibanak szamito furcsasagok
         self.minifat = None
@@ -116,6 +120,7 @@ class OleFile:
     def load_fat_sect(self, idx):
         for s in idx:
             if s in (ENDOFCHAIN, FREESECT): break
+            if not self.strict and len(self.fat) >= self.nb_sect: break   # a tobbi ugyis levagodik (DoS vedelem)
             b = self.getsect(s)
             if b is None: break
             self.fat += self.sect2list(b)
@@ -130,6 +135,7 @@ class OleFile:
             nb = (self.num_fat_sectors - 109 + per - 1) // per
             if self.num_difat_sectors != nb: self.defect(INCORRECT, "incorrect DIFAT")
             s = self.first_difat_sector
+            if not self.strict: nb = min(nb, self.num_difat_sectors, self.nb_sect)   # hibas/oriasi szamok (DoS vedelem)
             for i in range(nb):
                 b = self.getsect(s)
                 if b is None: break
@@ -149,6 +155,10 @@ class OleFile:
         nb = (size + ss - 1) // ss
         if nb > len(fat): self.defect(INCORRECT, "malformed OLE document, stream too large")
         if size == 0 and sect != ENDOFCHAIN: self.defect(INCORRECT, "incorrect OLE sector index for empty stream")
+        seen = None
+        if not self.strict:
+            nb = min(nb, len(fat))   # ciklus nelkul a lanc nem lehet hosszabb a FAT-nal
+            seen = set()
         out = []
         for i in range(nb):
             if sect == ENDOFCHAIN:
@@ -158,6 +168,15 @@ class OleFile:
             if sect >= len(fat):
                 self.defect(INCORRECT, "incorrect OLE FAT, sector index out of range")
                 break
+            if seen is not None:
+                if sect in seen:
+                    self.defect(INCORRECT, "loop in OLE sector chain")
+                    break
+                seen.add(sect)
+                self.read_budget -= ss
+                if self.read_budget < 0:
+                    self.defect(INCORRECT, "OLE read limit exceeded (overlapping streams?)")
+                    break
             o = offset + ss * sect
             b = data[o:o + ss]
             if len(b) != ss and sect != len(fat) - 1: self.defect(INCORRECT, "incomplete OLE sector")
