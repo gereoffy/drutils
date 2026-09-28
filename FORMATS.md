@@ -222,7 +222,22 @@ epub (a `mimetype` tag alapján), SPSS Viewer (spv), jar, apk, egyéb zip.
   directory** minden bejegyzése egy rekord elejére mutat. Titkosított prezentációnál csak a Current User.
 
 **Beágyazott képek:** a doc `Data`, a ppt `Pictures` streamjéből és az xls MSODRAWINGGROUP rekordjaiból a JPEG és
-PNG képeket (OfficeArt BLIP) kivágja, és a `testjpeg`-gel / `testpng`-vel ellenőrzi.
+PNG képeket (OfficeArt BLIP) kivágja, és a `testjpeg`-gel / `testpng`-vel ellenőrzi. Ha a `testole.py`-t önmagában
+használják, és a `testjpeg`/`testpng` nincs meg, a képek ellenőrzése kimarad (debug figyelmeztetés), ez nem hiba.
+
+**Thumbs.db (a Windows XP/2003 Intéző bélyegkép-gyorsítótára, `Catalog` stream):** a visszaállító programok gyakran
+`.doc` néven mentik, mert OLE fájl.
+- A `Catalog` bejegyzései (hossz, sorszám, dátum, eredeti fájlnév) hiánytalanok és a streamen belül vannak.
+- Minden bejegyzéshez van bélyegkép-stream (a neve a sorszám visszafelé, pl. 12 → `21`), a fejléc mérete stimmel, és a
+  JPEG-et a `testjpeg` dekódolja. A régi (Windows 2000/ME) bélyegképek JPEG-jéből hiányoznak a Huffman-táblák, ezekhez
+  a szabványos táblákat (ITU T.81, K.3–K.6) teszi elé.
+- Hibás vagy hiányzó bélyegkép → hiba. A mintákon (187 fájl, 17249 bélyegkép) mind ép.
+- **`THUMB_INFO` sor** bélyegképenként (a mappa egykori képeinek listája, akkor is, ha maguk a képek elvesztek):
+
+  `THUMB_INFO;fájlnév;sorszám;az eredeti kép neve;dátum;OK|BAD|MISSING|-`
+
+  A dátum a kép módosítási ideje a bélyegkép készítésekor (helyi idő). A `-` azt jelenti, hogy a képet nem
+  ellenőrizte (nincs `testjpeg`). CSV: `grep -a '^THUMB_INFO;' kimenet.txt > thumbs.csv`.
 
 **`OLE_INFO` sor** (minden fájlról, debug módtól függetlenül), pl. `grep -a ^OLE_INFO kimenet.txt > ole.csv`:
 

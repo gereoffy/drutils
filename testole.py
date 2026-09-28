@@ -309,12 +309,110 @@ class OleFile:
 blip_types = {0xF01D: ("jpg", (0x46A, 0x6E2), (0x46B, 0x6E3)), 0xF02A: ("jpg", (0x46A, 0x6E2), (0x46B, 0x6E3)), 0xF01E: ("png", (0x6E0,), (0x6E1,))}
 
 
+_image_checkers = {}
+
+def image_checker(fmt, log):
+    """
+    kep ellenorzo fuggveny (kep -> hibapont), vagy None. A testjpeg/testpng csak akkor kell, ha van kep; ha nincs meg a
+    modul (pl. a testole.py-t onmagaban hasznaljak), a kep ellenorzes kimarad (figyelmeztetessel).
+    """
+    if fmt not in _image_checkers:
+        try:
+            if fmt == "jpg":
+                from testjpeg import testjpeg
+                _image_checkers[fmt] = lambda img: testjpeg(img, embedded=True)
+            else:
+                from testpng import testpng
+                _image_checkers[fmt] = testpng
+        except ImportError as e:
+            _image_checkers[fmt] = None
+            _image_checkers[fmt + "_err"] = str(e)
+    if _image_checkers[fmt] is None: log("WARNING: embedded %s images not checked: %s" % (fmt, _image_checkers[fmt + "_err"]))
+    return _image_checkers[fmt]
+
+
+###############################################################################################################################
+# Thumbs.db (Windows XP/2003 Intezo belyegkep gyorsitotar): Catalog stream (az eredeti fajlnevek es datumok) +
+# belyegkepenkent egy stream (a nev a sorszam visszafele: 12 -> "21"), benne JPEG
+###############################################################################################################################
+
+# a regi (Windows 2000/ME) belyegkepek JPEG-jebol hianyoznak a Huffman tablak: a szabvanyos tablakat (ITU T.81 K.3-K.6) tesszuk ele
+def _dht(tc_th, bits, vals): return bytes([tc_th]) + bytes(bits) + bytes.fromhex(vals)
+_STD_DHT_BODY = (
+    _dht(0x00, [0,1,5,1,1,1,1,1,1,0,0,0,0,0,0,0], "000102030405060708090a0b") +
+    _dht(0x10, [0,2,1,3,3,2,4,3,5,5,4,4,0,0,1,0x7d],
+         "01020300041105122131410613516107227114328191a1082342b1c11552d1f02433627282090a161718191a25262728292a3435363738393a"
+         "434445464748494a535455565758595a636465666768696a737475767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aa"
+         "b2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9fa") +
+    _dht(0x01, [0,3,1,1,1,1,1,1,1,1,1,0,0,0,0,0], "000102030405060708090a0b") +
+    _dht(0x11, [0,2,1,2,4,4,3,4,7,5,4,4,0,1,2,0x77],
+         "000102031104052131061241510761711322328108144291a1b1c109233352f0156272d10a162434e125f11718191a262728292a35363738393a"
+         "434445464748494a535455565758595a636465666768696a737475767778797a82838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aa"
+         "b2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9cad2d3d4d5d6d7d8d9dae2e3e4e5e6e7e8e9eaf2f3f4f5f6f7f8f9fa"))
+STD_DHT = b'\xff\xc4' + (len(_STD_DHT_BODY) + 2).to_bytes(2, 'big') + _STD_DHT_BODY
+
+
+def check_thumbs(ole, log):
+    """
+    Thumbs.db: a Catalog bejegyzesei (hossz, sorszam, FILETIME, UTF-16 nev), minden bejegyzeshez van belyegkep stream,
+    a stream fejlece (fejlec hossz, tipus, meret) es a JPEG dekodolhato.
+    visszaad: (hibauzenet vagy None, [(sorszam, eredeti nev, datum, OK|BAD|MISSING|-)])
+    """
+    c = ole.openstream('Catalog').read()
+    if len(c) < 16: return "Catalog stream too short", []
+    hl, ver, cnt, w, h = unpack_from('<HHLLL', c, 0)
+    log("DB: Thumbs.db catalog version %d, %d entries, thumbnails %dx%d" % (ver, cnt, w, h))
+    p = hl
+    entries = []
+    err = None
+    while p + 16 <= len(c) and len(entries) < cnt:
+        l, idx, ft = unpack_from('<LLQ', c, p)
+        if l < 16 or p + l > len(c):
+            err = "bad catalog entry #%d at %d (length %d)" % (len(entries) + 1, p, l)
+            break
+        entries.append((idx, c[p + 16:p + l].decode('utf-16le', 'replace').split('\x00')[0], _filetime(ft)))
+        p += l
+    if not err and len(entries) != cnt: err = "catalog has %d of %d entries (truncated?)" % (len(entries), cnt)
+    check = image_checker("jpg", log)
+    streams = {s[0] for s in ole.listdir() if len(s) == 1}
+    out = []
+    bad = missing = 0
+    first = None
+    for idx, name, t in entries:
+        sn = str(idx)[::-1]
+        if sn not in streams:
+            missing += 1
+            out.append((idx, name, t, "MISSING"))
+            if first is None: first = "no thumbnail stream for #%d %s" % (idx, name)
+            continue
+        b = ole.openstream(sn).read()
+        e = 0
+        if len(b) < 12: e = 10
+        else:
+            hlen, typ, size = unpack_from('<LLL', b, 0)
+            img = b[hlen:]
+            if size != len(img) or hlen < 12: e = 10
+            elif img[:3] != b'\xff\xd8\xff' and len(img) >= 16:   # regi tipus: meg 16 byte fejlec, JPEG Huffman tablak nelkul
+                img = img[16:]
+                if b'\xff\xc4' not in img[:512]: img = img[:2] + STD_DHT + img[2:]
+            if not e and check: e = check(img)
+        state = "BAD" if e else "OK" if check else "-"
+        if e:
+            bad += 1
+            if first is None: first = "thumbnail #%d (%s) bad" % (idx, name)
+        log("DB: #%d %s %s %s" % (idx, name, t.strftime('%Y-%m-%d %H:%M:%S') if t else "-", state))
+        out.append((idx, name, t, state))
+    extra = streams - {str(i)[::-1] for i, n, t in entries} - {"Catalog"}
+    if extra: log("WARNING: %d thumbnail streams without catalog entry" % len(extra))
+    if not err and (bad or missing): err = "%d of %d thumbnails bad, %d missing, first: %s" % (bad, len(entries), missing, first)
+    return err, out
+
+
 def check_blips(d, log):
     """ visszaad: (kepek szama, hibas kepek szama, elso hiba leirasa) """
-    from testjpeg import testjpeg
-    from testpng import testpng
     cnt = bad = 0
     first = None
+    checker = lambda fmt: image_checker(fmt, log)
     for rt, (fmt, inst1, inst2) in blip_types.items():
         pat = bytes([rt & 0xFF, rt >> 8])
         i = d.find(pat, 2)
@@ -327,12 +425,14 @@ def check_blips(d, log):
                 end = p + 8 + l
                 img = d[start:end]
                 if img[:3] == b'\xff\xd8\xff' or img[:8] == b'\x89PNG\r\n\x1a\n':
-                    cnt += 1
-                    e = 10 if end > len(d) else (testjpeg(img, embedded=True) if fmt == "jpg" else testpng(img))
-                    log("OLE: embedded %s image at %d, %d bytes%s" % (fmt, start, len(img), " BAD" if e else ""))
-                    if e:
-                        bad += 1
-                        if first is None: first = "%s image at %d (%d bytes)" % (fmt, start, l)
+                    c = checker(fmt)
+                    if end > len(d) or c is not None:
+                        cnt += 1
+                        e = 10 if end > len(d) else c(img)
+                        log("OLE: embedded %s image at %d, %d bytes%s" % (fmt, start, len(img), " BAD" if e else ""))
+                        if e:
+                            bad += 1
+                            if first is None: first = "%s image at %d (%d bytes)" % (fmt, start, l)
             i = d.find(pat, i + 1)
     return cnt, bad, first
 
@@ -737,12 +837,17 @@ def testole(d, debug=False, fname=""):
     visszaad: (hibapont, kiterjesztes). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent.
     Minden filerol kiir egy sort (grep -a -val CSV-be gyujtheto):
       OLE_INFO;filenev;formatum verzio;tipus;letrehozas;utolso mentes;datum forrasa (meta|ole);utoljara mentette;szerzo;cim;program;OK|BAD
+    Thumbs.db eseten belyegkepenkent:
+      THUMB_INFO;filenev;sorszam;az eredeti kep neve;datum;OK|BAD|MISSING|- (- : nincs testjpeg)
     """
-    info = [("",) * 8]
+    info = [("",) * 8, []]
     errcnt, ext = _testole(d, debug, info)
     def clean(x): return re.sub(r'[\x00-\x1f\x7f\ufeff]+', ' ', str(x).replace(";", ",")).strip()
     i = info[0]
     print("OLE_INFO;" + ";".join(clean(x) for x in (fname,) + i[:1] + (ext,) + i[1:] + ("OK" if errcnt == 0 else "BAD" if errcnt > 0 else "DUNNO",)))
+    # Thumbs.db: a belyegkepek eredeti fajlnevei (a mappa kepei), datummal
+    for idx, name, t, state in info[1]:
+        print("THUMB_INFO;" + ";".join(clean(x) for x in (fname, idx, name, t.strftime('%Y-%m-%d %H:%M:%S') if t else "", state)))
     return errcnt, ext
 
 
@@ -815,7 +920,9 @@ def _testole(d, debug, info):
             ext = "ppt"
             err, encrypted = check_ppt(ole, ole.openstream('PowerPoint Document').read(), log)
             if not err and not encrypted and ole.exists('Pictures'): pictures = ole.openstream('Pictures').read()
-        elif ole.exists('Catalog'): ext = "db"
+        elif ole.exists('Catalog'):
+            ext = "db"
+            err, info[1] = check_thumbs(ole, log)
         elif ole.exists('EncryptedPackage'): log("OLE: encrypted OOXML (docx/xlsx/pptx) document")
         if pictures:
             cnt, bad, first = check_blips(pictures, log)
