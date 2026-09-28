@@ -242,6 +242,10 @@ for k in sorted(filedata.keys()):
     for fs,fn,t,fref,parent in filedata[k]:
         print(fs,t,"%d/%d"%(fref,parent),'"%s/%s"'%(get_path(parent),fn))
 
+# a kis fajlok szuloihez is legyen utvonal a dirmap-ben (indxrename.py hasznalja):
+for k in filedata:
+    for fs,fn,t,fref,parent in filedata[k]: get_path(parent)
+
 pickle.dump((filedata,dirmap),open("INDEX.pck","wb"))
 
 # restore files:
@@ -251,6 +255,7 @@ for mft in mftfiles:
     print("COPY %d bytes to %s  (%d runs)"%(fs,fn,len(runs)))
     with open(fn,"wb") as fo:
         for ro,rl in runs:
+            if not ro: fo.write(bytes(BLKSIZE*rl)) ; continue # sparse run
             f.seek(part_start+BLKSIZE*ro)
             fo.write(f.read(BLKSIZE*rl))
         fo.truncate(fs)
@@ -262,5 +267,6 @@ for mft in mftfiles:
     fn=get_path(parent)+"/"+fnev
     print("DELETE %d bytes of %s  (%d runs)"%(fs,fn,len(runs)))
     for ro,rl in runs:
+        if not ro: continue # sparse run: nincs mit torolni (es a boot szektort se nullazzuk!)
         f.seek(part_start+BLKSIZE*ro)
         f.write(bytes(BLKSIZE*rl))

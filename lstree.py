@@ -6,7 +6,8 @@ import lznt1
 blksize=4096
 part_start=0x100000
 
-def decode_run1(data,compr,debug=False,tryfix=False,size=0,runs=[]):
+def decode_run1(data,compr,debug=False,tryfix=False,size=0,runs=None):
+    if runs is None: runs=[] # a probalkozo rekurziv hivasok ne egy kozos default listaba gyujtsenek
     total=0
     cluster=0
     i=0
@@ -267,11 +268,18 @@ def parse_MFT(data,mft,debug=False):
 #            runs=decode_runs(data[runso:size],"%d/%d/%d"%(size1,size2,size3),blksize*(1<<compr),mft=-1,fnev=None):
             rundata=data[o+runso:o+l] #.split(b'\xff\xff\xff\xff')[0]
 #            print("    RUNdata:",rundata.hex(' '))
-            runerr,runtotal=decode_run1(rundata,compr//4096,runs=runs)
+            cunit=(1<<compr) if compr else 0 # compression unit in clusters (compr itt a kitevo!)
+            runerr,runtotal=decode_run1(rundata,cunit,runs=runs)
             if runerr>=0:
                 print("    RUNlist error:",runerr,o+runso+runerr, runtotal)
                 runs=[]
-                runerr,runtotal=decode_run1(rundata,compr//4096,debug=True,tryfix=True,size=vcnsize,runs=runs)
+                runerr,runtotal=decode_run1(rundata,cunit,debug=True,tryfix=True,size=vcnsize,runs=runs)
+                if runerr<0 and runtotal==vcnsize: print("    RUNlist FIXED")
+                elif cunit:
+                    # nem sikerult javitani: vissza a sima (tomorites-ellenorzes nelkuli) dekodolasra
+                    print("    RUNlist CantFIX, fallback to plain decode")
+                    runs=[]
+                    runerr,runtotal=decode_run1(rundata,0,runs=runs)
             elif runtotal!=vcnsize:
                 print("    RUNlist bad total:",runtotal)
             if debug: print("    RUNlist:",runs)
@@ -382,7 +390,7 @@ def copyfile(path,size,runs,compr=0,write=False,read=True,debug=False):
 #            data2=lznt1.decompress(data)
             data2,inlen=lznt1.decomp2(data,compr)
             if debug: print("Decompressed  %d / %d(+%d) -> %d"%(inlen,s,s2,len(data2)))
-            if len(data2)!=compr: print("COPY ERROR! wrong decompressed blocksize: %d != %d",len(data2),compr)
+            if len(data2)!=compr: print("COPY ERROR! wrong decompressed blocksize: %d != %d"%(len(data2),compr))
             if write: f.write(data2)
             total+=len(data2)
             # sparse?

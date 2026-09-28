@@ -36,13 +36,17 @@ def docxdate(fnev,debug=False):
   return datum
 
 
-def oledate(fnev):
-  with olefile.OleFileIO(fnev) as ole:
-#    print(ole.get_metadata().dump())
-    d=ole.get_metadata().last_saved_time
-    if not d: d=ole.get_metadata().create_time
-#    print("OLE:",type(d),d)
-  d=int(d.timestamp()) if d else 0
+def oledate(fnev,debug=False):
+  try:
+    with olefile.OleFileIO(fnev) as ole:
+#      print(ole.get_metadata().dump())
+      d=ole.get_metadata().last_saved_time
+      if not d: d=ole.get_metadata().create_time
+#      print("OLE:",type(d),d)
+    d=int(d.timestamp()) if d else 0
+  except Exception as e: # serult OLE file
+    if debug: print(repr(e))
+    d=0
 #  print(d,fnev)
   return d
 
@@ -92,7 +96,7 @@ for fnev in sys.argv[1:]:
         for s1,n1,d1,fr,dr in filedata[s]:
 
             if n1.startswith("~"): continue # tempfile, skip
-            fn=dirmap[dr]+"/"+n1
+            fn=dirmap.get(dr,"dir__%d"%(dr))+"/"+n1  # regi INDEX.pck-ban nem minden szulo van benne
             if exists(fn): continue # already found
             ecnt+=1
 
@@ -104,7 +108,7 @@ for fnev in sys.argv[1:]:
             cnt+=1
             dd=abs(d1-d)
         #    if e in ["doc","xls","ppt"] and dd>12*3600: continue # bad date
-            if len(filedata[s])>1: print("\t\t",dd,dirmap[dr]+"/"+n1)
+            if len(filedata[s])>1: print("\t\t",dd,fn)
             if not bestn or dd<bestd:
                 bestn=fn
                 bestd=dd
@@ -112,7 +116,10 @@ for fnev in sys.argv[1:]:
             cnt=len(ncnt) # FIXME?
             print(d,s,fnev,"OK(%d/%d)"%(cnt,len(filedata[s])), e, bestd, bestn)
             if bestd<61+3600*2 or cnt==1 or 1:    # 1=rename all  0=if timestamp match
-                os.rename(fnev,bestn)
+                try:
+                    os.makedirs(os.path.dirname(bestn), exist_ok=True)
+                    os.rename(fnev,bestn)
+                except OSError as e: print("RENAME ERROR:",fnev,bestn,repr(e))
             else: print("NAMES:",ncnt.keys())     # list possible filenames
         else:
             print(d,s,fnev,"BAD(%d/%d)"%(ecnt,len(filedata[s])), filedata[s])

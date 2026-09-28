@@ -78,7 +78,7 @@ def decomp2(buf,compr=0):
                 out += _decompress_chunk(chunk)
             else:
                 out += chunk
-            if compr and len(out)>compr: ValueError('invalid output length')
+            if compr and len(out)>compr: raise ValueError('invalid output length')
 #            if len(out)==compr: break # megvagyunk!
         buf = buf[2+length:]
         inlen+=2+length
