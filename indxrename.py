@@ -60,12 +60,19 @@ def oledate(fnev,debug=False):
 #    print(ole.listdir(streams=False, storages=True))
 #    print(ole.listdir())
 
+# a PhotoRec altal adott es az eredeti kiterjesztes elterhet (pl. .jpeg -> .jpg), ezeket egy nevre hozzuk:
+EXT_ALIAS={"jpeg":"jpg","jpe":"jpg","jfif":"jpg","tiff":"tif","htm":"html","pps":"ppt","ppsx":"pptx","mpeg":"mpg"}
+
+def normext(fnev):
+    e=os.path.splitext(fnev)[1][1:].lower()
+    return EXT_ALIAS.get(e,e)
+
 # detect file size, date & extension from content
 def fileinfo(fnev):
     st=os.stat(fnev)
     d=int(st.st_mtime)
     s=st.st_size
-    e=fnev.split(".")[-1].lower()
+    e=normext(fnev)
     with open(fnev,"rb") as f: data=f.read(4096)
 #    print(data[:8], e)
     if data.startswith(b'PK\x03\x04'): # ZIP file
@@ -78,10 +85,21 @@ def fileinfo(fnev):
     return s,d,e
 
 
+USAGE="usage: indxrename.py [--all] file...\n  --all  rename to the best candidate even if the timestamp does not match"
+
+args=sys.argv[1:]
+rename_all=False  # False: csak ha a datum stimmel (vagy egyetlen jelolt van)  True: mindig a legjobb jeloltre
+while args and args[0].startswith("--"):
+    opt=args.pop(0)
+    if opt=="--": break
+    elif opt=="--all": rename_all=True
+    else: print(USAGE) ; sys.exit(1)
+if not args: print(USAGE) ; sys.exit(1)
+
 filedata,dirmap = pickle.load(open("INDEX.pck","rb"))
 #print(dirmap)
 
-for fnev in sys.argv[1:]:
+for fnev in args:
     s,d,e=fileinfo(fnev)
     if s in filedata:
 #        if len(f)==1:
@@ -100,9 +118,7 @@ for fnev in sys.argv[1:]:
             if exists(fn): continue # already found
             ecnt+=1
 
-            e1=n1.split(".")[-1].lower()
-            if e1=="pps": e1="ppt"
-            if e!=e1: continue # extension mismatch
+            if e!=normext(n1): continue # extension mismatch
 
             ncnt[fn]=True
             cnt+=1
@@ -114,13 +130,15 @@ for fnev in sys.argv[1:]:
                 bestd=dd
         if bestn:
             cnt=len(ncnt) # FIXME?
-            print(d,s,fnev,"OK(%d/%d)"%(cnt,len(filedata[s])), e, bestd, bestn)
-            if bestd<61+3600*2 or cnt==1 or 1:    # 1=rename all  0=if timestamp match
+            if bestd<61+3600*2 or cnt==1 or rename_all:
+                print(d,s,fnev,"OK(%d/%d)"%(cnt,len(filedata[s])), e, bestd, bestn)
                 try:
                     os.makedirs(os.path.dirname(bestn), exist_ok=True)
                     os.rename(fnev,bestn)
-                except OSError as e: print("RENAME ERROR:",fnev,bestn,repr(e))
-            else: print("NAMES:",ncnt.keys())     # list possible filenames
+                except OSError as err: print("RENAME ERROR:",fnev,bestn,repr(err))
+            else:
+                print(d,s,fnev,"SKIP(%d/%d)"%(cnt,len(filedata[s])), e, bestd, bestn)
+                print("NAMES:",list(ncnt.keys()))     # list possible filenames
         else:
             print(d,s,fnev,"BAD(%d/%d)"%(ecnt,len(filedata[s])), filedata[s])
     else:
