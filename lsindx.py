@@ -11,7 +11,8 @@ BLKSIZE=4096
 MFTSIZE=1024
 
 SCANCHUNK=1024*1024          # egyszerre ennyit olvas az eszkozrol (512 tobbszorose, es nagyobb mint SCANMAXREC!)
-SCANPROGRESS=1024*1024*1024  # ennyi byte-onkent egy progress karakter az stdout-ra (M=mft I=indx 0=ures .=egyeb)
+SCANPROGRESS=1024*1024*1024  # ennyi byte-onkent egy progress karakter az stdout-ra (M=mft lanc m=kosza mft I=indx 0=ures .=egyeb)
+SCANCHAIN=64                 # ennyi egymas utani (1024 byte-onkent egyesevel novo MFT#) FILE rekord mar "M" (MFT lanc), a kevesebb "m"
 SCANLINE=64                  # ennyi progress karakter utan uj sor (statisztikaval)
 SCANALIGN=512                # a FILE/INDX/NTFS rekordokat ennyire igazitva keresi
 SCANMAXREC=65536             # legnagyobb elfogadott rekordmeret, ennyi atfedessel olvas (blokkhataron atlogo rekordok)
@@ -260,6 +261,7 @@ def scan_device(device):
     lastcp=base
     t0=time.time() ; p0=base
     cnt={b'FILE':0,b'INDX':0,b'NTFS':0}
+    chain=[-1,-1,0,0]         # MFT lanc: utolso FILE pozicio, utolso MFT#, lanc kezdo pozicio, lanc hossz
     marks={}                  # progress: GB index -> "M"/"I"/"." (ami nincs benne, az csupa 0 volt)
     shown=sgb=base//SCANPROGRESS  # a kovetkezo kiirando progress karakter GB indexe (sgb: ahonnan most indultunk)
     rpos=base                 # olvasasi pozicio
@@ -295,8 +297,15 @@ def scan_device(device):
                         out.write(struct.pack("<QI",base+j,n)) ; out.write(buf[j:j+n])
                         cnt[sig[:4]]+=1
                         g=(base+j)//SCANPROGRESS
-                        if sig==b'FILE': marks[g]="M"
-                        elif sig==b'INDX' and marks.get(g)!="M": marks[g]="I"
+                        if sig==b'FILE':
+                            mft=int.from_bytes(buf[j+44:j+48],"little")
+                            if base+j==chain[0]+n and mft==chain[1]+1: chain[2:]=[chain[2],chain[3]+1]
+                            else: chain[2:]=[base+j,1]
+                            chain[:2]=[base+j,mft]
+                            if chain[3]>=SCANCHAIN:
+                                for gg in range(chain[2]//SCANPROGRESS,g+1): marks[gg]="M" # a lanc eleje is, ha meg nincs kiirva
+                            elif marks.get(g)!="M": marks[g]="m"
+                        elif sig==b'INDX' and marks.get(g) not in ("M","m"): marks[g]="I"
                 i=buf.find(sig,i+1)
         buf=buf[limit:] ; base+=limit
         progress((devsize+SCANPROGRESS-1)//SCANPROGRESS if eof else base//SCANPROGRESS) # a base elotti GB-ok mar keszek
@@ -346,11 +355,11 @@ for fpos,data in read_scanfile():
 
 # find FILE (MFT) entries:
 for fpos,data in read_scanfile():
-    if data[0:4]==b'FILE': parse_MFT(data,fpos)
+    if data[0:4]==b'FILE' and fpos>=part_start: parse_MFT(data,fpos) # a particio elotti "szemet" kimarad
 
 # find INDX (dir) entries:
 for fpos,data in read_scanfile():
-    if data[0:4]==b'INDX': parseindx(data,fpos)
+    if data[0:4]==b'INDX' and fpos>=part_start: parseindx(data,fpos)
 
 #exit(0)
 

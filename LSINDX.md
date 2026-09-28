@@ -63,13 +63,14 @@ lásd a 7. lépést.
 
 ### Beállítás
 
-A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-22](lsindx.py:10)):
+A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-23](lsindx.py:10)):
 
 | Változó | Alapérték | Jelentés |
 |---|---|---|
 | `BLKSIZE` | `4096` | Klaszterméret (és az `INDX` blokkméret) bájtban. |
 | `MFTSIZE` | `1024` | MFT-rekord mérete. |
 | `SCANPROGRESS` / `SCANLINE` | 1 GiB / 64 | Ennyi bájtonként egy progress karakter, ennyi karakterenként új sor. |
+| `SCANCHAIN` | 64 | Ennyi egymás utáni `FILE` rekordtól számít MFT-láncnak (`M`), kevesebbnél `m`. |
 | `SCANCHUNK` | 1 MiB | Egyszerre ennyit olvas az eszközről. 512 többszöröse, és nagyobb, mint `SCANMAXREC`. |
 | `SCANALIGN` | 512 | Ekkora igazítással keresi a rekordokat. |
 | `SCANMAXREC` | 64 KiB | Legnagyobb elfogadott rekordméret. Ennyi átfedéssel olvas, hogy a blokkhatáron átlógó rekordok is meglegyenek. |
@@ -100,7 +101,7 @@ A két kapcsoló együtt is megadható, de a javasolt menet az, hogy előbb csak
 futtatod, **ellenőrzöd a mentést**, és csak utána, külön futással jön a
 `--delete-from-device`. A törlés nem másol újra semmit, és a másolatokat sem ellenőrzi.
 
-**1. Szkennelés** (`scan_device`, [lsindx.py:244](lsindx.py:244)) – a lemezt **egyetlen
+**1. Szkennelés** (`scan_device`, [lsindx.py:245](lsindx.py:245)) – a lemezt **egyetlen
 menetben**, 1 MiB-os blokkokban olvassa végig. Minden blokkban megkeresi az 512 bájtra
 igazított rekordokat:
 
@@ -132,8 +133,9 @@ A haladást az stdout-ra írja, gigabájtonként egy karakterrel:
 
 | Karakter | Jelentés az adott GB-ban |
 |---|---|
-| `M` | volt benne MFT-rekord (`FILE`) |
-| `I` | csak INDX-rekord volt benne |
+| `M` | MFT-lánc: legalább `SCANCHAIN` (64) egymás utáni `FILE` rekord, egyesével növő MFT-sorszámmal |
+| `m` | csak kósza (láncon kívüli) `FILE` rekord, pl. régi másolat a `$LogFile`-ban vagy a pagefile-ban |
+| `I` | INDX-rekord, `FILE` rekord nélkül |
 | `.` | van benne adat, de nem talált rekordot |
 | `0` | csupa nulla |
 
@@ -141,8 +143,8 @@ A haladást az stdout-ra írja, gigabájtonként egy karakterrel:
 haladást, a sebességet és az addig talált rekordok számát írja:
 
 ```
-       0 GB 00000000000000000000000000000000.....I..I...I.....M..I..I..I....  64/3726 GB  182 MB/s  FILE=40 INDX=1201 NTFS=0
-      64 GB ..I...I......I...II....I..........I.......I...................  128/3726 GB  181 MB/s  FILE=40 INDX=2533 NTFS=0
+       0 GB MmmMmmmIImmmmMmmmmmmmmmMm.00000000000000000000000000000000000000  64/120 GB  383 MB/s  FILE=461913 INDX=50724 NTFS=9
+      64 GB 0000000000000000000000000000000000000000000000000000000.  120/120 GB  395 MB/s  FILE=461913 INDX=50724 NTFS=10
 ```
 
 A karakterenkénti méret és a sor hossza a `SCANPROGRESS` és a `SCANLINE` konstanssal
@@ -207,7 +209,7 @@ csak olvassa, de a lemezt így is óvni kell:
 
 A szkennelés után a feldolgozás így halad:
 
-**0. Boot szektorok** ([lsindx.py:336](lsindx.py:336)) – a `SCAN.dat`-ban talált összes NTFS
+**0. Boot szektorok** ([lsindx.py:345](lsindx.py:345)) – a `SCAN.dat`-ban talált összes NTFS
 boot szektor adatait kiírja: szektorméret, klaszterméret, MFT- és INDX-rekordméret, kötetméret,
 az MFT klaszterszáma, valamint a belőle adódó `part_start`. Ez utóbbi a boot szektor
 pozíciója, ha az első boot szektorról van szó. Ha a tartalékról, akkor a pozíció mínusz a
@@ -221,7 +223,13 @@ Ha a lemez eleje hiányzik, a tartalék boot szektorból derül ki a `BLKSIZE`, 
 `part_start`, amelyeket a szkript elején kell beállítani. Ezekhez a feldolgozás újrafuttatása
 elég, a lemezt nem kell újra szkennelni.
 
-**1. MFT-rekordok feldolgozása** ([lsindx.py:347-349](lsindx.py:347)) – a `SCAN.dat` minden
+A `part_start` előtt talált `FILE` és `INDX` rekordokat a feldolgozás figyelmen kívül hagyja.
+Ezek egy korábbi partícióhoz tartoznak (pl. Recovery vagy EFI), vagy más szemétnek számítanak,
+és a saját MFT-számaikkal összekevernék a könyvtárfát. Ha a teljes lemezről készült a
+`SCAN.dat`, így egy korábbi partíció is feldolgozható, a `part_start` átállításával. A
+partíció végével a szkript nem foglalkozik, a lemez végéig minden rekordot feldolgoz.
+
+**1. MFT-rekordok feldolgozása** ([lsindx.py:356-358](lsindx.py:356)) – a `SCAN.dat` minden
 `FILE` rekordját feldolgozza (`parse_MFT`):
 
 - Ellenőrzi a méreteket, és elvégzi a *fixup* (update sequence) javítást: az NTFS minden
@@ -238,7 +246,7 @@ elég, a lemezt nem kell újra szkennelni.
 - A fájlok a `filedata[méret]` listába, a könyvtárak a `dirlist[MFT#] = (név, szülő)`
   szótárba kerülnek.
 
-**2. INDX blokkok feldolgozása** ([lsindx.py:351-353](lsindx.py:351)) – a `SCAN.dat`
+**2. INDX blokkok feldolgozása** ([lsindx.py:360-362](lsindx.py:360)) – a `SCAN.dat`
 minden `INDX` rekordját feldolgozza (`parseindx`):
 
 - Fixup-javítás mind a 8 szektorra; hiba esetén „CRC error!” és a blokk kimarad.
@@ -260,26 +268,26 @@ minden `INDX` rekordját feldolgozza (`parseindx`):
   Ez az `offs` a `part_start` helyes értéke. Érdemes először egy próbafutással ezt
   kideríteni, beállítani, és csak utána futtatni élesben.
 
-**3. Könyvtárfa felépítése** ([lsindx.py:359-375](lsindx.py:359)) – `get_path` a szülő-láncot
+**3. Könyvtárfa felépítése** ([lsindx.py:368-384](lsindx.py:368)) – `get_path` a szülő-láncot
 a gyökérig (MFT#5, amelynek neve `.`) követi, és `os.makedirs`-szel létrehozza. Ha a lánc egy
 ismeretlen könyvtárnál megszakad, annak helyén `dir__<MFT#>` nevű mappa jön létre.
 
-**4. Fájllista** ([lsindx.py:377-380](lsindx.py:377)) – az 1024 bájtnál nagyobb fájlokat
+**4. Fájllista** ([lsindx.py:386-389](lsindx.py:386)) – az 1024 bájtnál nagyobb fájlokat
 méret szerint rendezve kiírja a logba:
 
 ```
 <méret> <unix idő> <fájl MFT#>/<szülő MFT#> "<útvonal/név>"
 ```
 
-**5. `INDEX.pck` mentése** ([lsindx.py:382-386](lsindx.py:382)) – előtte a kis fájlok
+**5. `INDEX.pck` mentése** ([lsindx.py:391-395](lsindx.py:391)) – előtte a kis fájlok
 szülőkönyvtáraihoz is létrehozza az útvonalat, lásd lent.
 
-**6. Visszamásolás** – csak `--restore` esetén ([lsindx.py:391](lsindx.py:391)). A
+**6. Visszamásolás** – csak `--restore` esetén ([lsindx.py:400](lsindx.py:400)). A
 `SCAN.pos`-ban tárolt eszközt nyitja meg, csak olvasásra. Az `mftfiles` fájljait a
 run-listájuk alapján kimásolja a helyükre, a méretre vágja, és beállítja a módosítási időt.
 Log: `COPY <bájt> bytes to <útvonal>  (<n> runs)`.
 
-**7. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:405](lsindx.py:405)).
+**7. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:414](lsindx.py:414)).
 Az összes MFT alapján visszaállítható fájl klasztereit nullákkal felülírja az eszközön (a
 sparse futásokat kihagyja). Log: `DELETE <bájt> bytes of <útvonal>`.
 
