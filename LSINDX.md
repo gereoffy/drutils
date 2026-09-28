@@ -14,7 +14,7 @@ listában szereplő eredeti nevekhez és helyekhez rendelni.
 
 | Fájl | Szerep |
 |---|---|
-| [lsindx.py](lsindx.py) | A teljes image-et végigszkenneli `FILE` (MFT) és `INDX` rekordokért, felépíti a könyvtárfát és a fájllistát, visszamásolja az ép MFT-rekordú fájlokat, opcionálisan **kinullázza** azok klasztereit az image-ben. |
+| [lsindx.py](lsindx.py) | A teljes image-et végigszkenneli `FILE` (MFT) és `INDX` rekordokért, felépíti a könyvtárfát és a fájllistát, kérésre (`--restore`) visszamásolja az ép MFT-rekordú fájlokat, és külön kérésre (`--delete-from-device`) **kinullázza** azok klasztereit az eszközön. |
 | [indxrename.py](indxrename.py) | A PhotoRec által név nélkül visszaállított fájlokat az `INDEX.pck` alapján (méret, kiterjesztés, Office-metaadatból kinyert dátum) párosítja az eredeti nevekkel, és a helyükre mozgatja őket. |
 
 A tömörített fájlok és a kimentett `$MFT` alapú mentés egy külön eszköz feladata, lásd:
@@ -29,13 +29,17 @@ A tömörített fájlok és a kimentett `$MFT` alapú mentés egy külön eszkö
  pendrive ──dd/ddrescue──▶ raw3x.img (MÁSOLAT!)
                                │
                                ▼
-                         lsindx.py
+              lsindx.py --scandisk raw3x.img
+          (egy menet, folytatható → SCAN.dat)
+                               │
+                               ▼
+                   lsindx.py (a SCAN.dat-ból)
             ┌──────────────────┼──────────────────────────┐
             ▼                  ▼                          ▼
    könyvtárfa a cwd-ben   INDEX.pck               ép MFT-rekordú fájlok
-   (üres mappák,          (méret → [név, idő,     visszamásolva a fába,
-    dir__N ismeretlen      MFT#, szülő] +         majd (opcionálisan) a
-    szülőkhöz)             szülő → útvonal)       klasztereik kinullázva
+   (üres mappák,          (méret → [név, idő,     visszamásolva a fába
+    dir__N ismeretlen      MFT#, szülő] +         (--restore), majd külön futással
+    szülőkhöz)             szülő → útvonal)       nullázva (--delete-from-device)
                                │                          │
                                │                          ▼
                                │              PhotoRec (TestDisk) raw scan
@@ -50,7 +54,8 @@ A tömörített fájlok és a kimentett `$MFT` alapú mentés egy külön eszkö
 
 A nullázás célja, hogy a nyers szkennelés már csak azokat a fájlokat találja meg,
 amelyeket az MFT alapján nem sikerült névvel együtt visszaállítani – így kevesebb a duplikátum
-és a hamis párosítás. A nullázás alapból **ki van kapcsolva**, lásd a 7. lépést.
+és a hamis párosítás. A nullázás csak a `--delete-from-device` kapcsolóval történik meg,
+lásd a 7. lépést.
 
 ---
 
@@ -58,31 +63,81 @@ amelyeket az MFT alapján nem sikerült névvel együtt visszaállítani – íg
 
 ### Beállítás
 
-A paraméterek a szkript elején, konstansként vannak ([lsindx.py:6-10](lsindx.py:6)):
+A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-18](lsindx.py:10)):
 
 | Változó | Alapérték | Jelentés |
 |---|---|---|
 | `BLKSIZE` | `4096` | Klaszterméret (és az `INDX` blokkméret) bájtban. |
 | `MFTSIZE` | `1024` | MFT-rekord mérete. |
-| `part_start` | `0` | A partíció kezdete az image-ben bájtban (lásd lent, hogyan derül ki). |
-| `device` | `/home/mentes-pd16g/raw3x.img` | A feldolgozandó image. |
+| `SCANCHUNK` | 1 MiB | Egyszerre ennyit olvas az eszközről. A `BLKSIZE` többszöröse legyen. |
+| `SCANCHECKPOINT` | 1 GiB | Ennyi olvasás után menti a folytatáshoz szükséges állapotot. |
+| `SCANFILE` | `SCAN.dat` | A megtalált `FILE`/`INDX` rekordok nyers másolata. |
+| `SCANPOS` | `SCAN.pos` | A szkennelés állapota (JSON): eszköz, meddig jutott, mekkora ekkor a `SCAN.dat`. |
+| `part_start` | `0` | A partíció kezdete az eszközön/image-ben bájtban (lásd lent, hogyan derül ki). |
+
+Az eszközt vagy image-et nem a kódban kell megadni, hanem a `--scandisk` kapcsolóval.
 
 ### Futtatás
+
+A szkript két lépésben dolgozik:
+
+```
+lsindx.py --scandisk <eszköz|image>   a lemez végigolvasása → SCAN.dat (folytatható)
+lsindx.py [--restore] [--delete-from-device]
+                                      a SCAN.dat feldolgozása → könyvtárfa, INDEX.pck
+```
+
+| Kapcsoló | Mit csinál | Eszköz megnyitása |
+|---|---|---|
+| *(nincs)* | Könyvtárfa, fájllista, `INDEX.pck`. | nem nyitja meg |
+| `--restore` | Ezen felül visszamásolja az ép MFT-rekordú fájlokat (6. lépés). | csak olvasásra (`rb`) |
+| `--delete-from-device` | Kinullázza az MFT alapján visszaállítható fájlok klasztereit (7. lépés), ellenőrzés nélkül. | **írásra** (`r+b`) |
+
+A két kapcsoló együtt is megadható, de a javasolt menet az, hogy előbb csak `--restore`-ral
+futtatod, **ellenőrzöd a mentést**, és csak utána, külön futással jön a
+`--delete-from-device`. A törlés nem másol újra semmit, és a másolatokat sem ellenőrzi.
+
+**1. Szkennelés** – a lemezt **egyetlen menetben**, 1 MiB-os blokkokban olvassa végig. Minden
+blokkban megkeresi a 1024 bájtra igazított `FILE` és a 4096 bájtra igazított `INDX`
+rekordokat, és ezeket nyersen hozzáírja a `SCAN.dat`-hoz, rekordonként így:
+`pozíció (8 bájt) + méret (4 bájt) + adat`. A haladást a hibakimenetre írja:
 
 ```bash
 mkdir mentes && cd mentes
 ```
 
 ```bash
+sudo pypy3 ../lsindx.py --scandisk /dev/sdX
+```
+
+```
+SCAN: 1024/3815447 MB (0.0%)  180 MB/s  FILE=12 INDX=340
+```
+
+Gigabájtonként menti a `SCAN.pos`-t. Ha a futás megszakad (Ctrl+C, áramszünet, leválasztott
+lemez), ugyanezzel a paranccsal onnan folytatja, ahol az utolsó mentés volt. Az utána írt,
+esetleg félig kiírt rekordokat a `SCAN.dat` végéről eldobja. Ha a szkennelés már kész,
+ezt kiírja, és nem olvas újra. Másik eszközzel nem folytat egy meglévő `SCAN.dat`-ot;
+újrakezdéshez mindkét fájlt törölni kell.
+
+**2. Feldolgozás** – a `SCAN.dat`-ból dolgozik, kapcsoló nélkül a lemezt meg sem nyitja.
+Tetszőleges alkalommal megismételhető, például a kód vagy a
+`part_start` módosítása után:
+
+```bash
 pypy3 ../lsindx.py > lsindx.log
 ```
 
+Ha nincs `SCAN.dat`, kiírja, hogyan kell létrehozni. Ha a szkennelés még nem fejeződött be,
+kiírja a folytatás parancsát.
+
 (A shebang `pypy3`-at vár a sebesség miatt; sima `python3`-mal is fut, csak lassabban.)
 
-> ⚠️ Az eszközt/image-et **csak olvasásra** nyitja meg (`rb`, [lsindx.py:199](lsindx.py:199)).
-> A nullázáshoz (7. lépés) `r+b` kellene, de azt csak az image **másolatán** szabad
-> használni, soha nem az eredeti lemezen.
+> ⚠️ Az eszközt/image-et a szkenneléskor és a `--restore`-nál **csak olvasásra** nyitja meg
+> (`rb`), írásra (`r+b`) kizárólag a `--delete-from-device`. Ezt a kapcsolót csak az image
+> **másolatán** szabad használni, soha nem az eredeti lemezen.
 >
+
 > ⚠️ A könyvtárfát és a fájlokat az **aktuális könyvtárba** hozza létre, ezért üres
 > munkakönyvtárból indítsd.
 
@@ -100,23 +155,26 @@ csak olvassa, de a lemezt így is óvni kell:
 
   Windowsra ne csatlakoztasd, mert felajánlhatja a `chkdsk` javítást, és az felülírhatja
   a megmaradt metaadatokat.
-- **`device` és `part_start`:** a legegyszerűbb a partíció eszközét megadni (pl.
-  `/dev/sdX2`), ekkor `part_start = 0`. Ha a teljes lemezt adod meg, a `part_start` a
+- **Eszköz és `part_start`:** a legegyszerűbb a partíció eszközét megadni a
+  `--scandisk`-nek (pl. `/dev/sdX2`), ekkor `part_start = 0`. Ha a teljes lemezt adod meg, a `part_start` a
   partíció kezdete bájtban (`fdisk -l` vagy `lsblk` alapján). A „Partíció-eltolás
   meghatározása” rész (2. lépés) ezt ellenőrizni is segít.
 - **Az állapot ellenőrzése előtte** (`smartctl -a /dev/sdX`): fizikailag hibás lemeznél
-  minden teljes olvasás további kockázat. A szkript két teljes menetben olvassa végig az
-  eszközt (MFT, majd INDX), és a PhotoRec ugyanezt egy harmadik alkalommal is megteszi.
-- **Olvasási hiba:** egy olvashatatlan szektornál a `read` kivételt dob, és a szkript
-  leáll. Az `INDEX.pck` csak a végén jön létre, így ilyenkor az addigi munka elvész.
-- **Futásidő:** 4 TB-nál egy menet is sok óra, ezért érdemes `pypy3`-mal futtatni.
-- **A kimenet** (az aktuális könyvtár, `INDEX.pck`, visszamásolt fájlok) és a PhotoRec
-  kimenete is **másik lemezre** kerüljön.
+  minden teljes olvasás további kockázat. A szkript egyetlen menetben olvassa végig az
+  eszközt, a PhotoRec pedig egy második alkalommal.
+- **Megszakadás, olvasási hiba:** egy olvashatatlan szektornál a `read` kivételt dob, és a
+  szkennelés leáll. A futás a legutóbbi gigabájtos mentéstől folytatható.
+- **Futásidő:** 4 TB-nál a szkennelés sok óra. A feldolgozás már csak a `SCAN.dat`-ot
+  olvassa, ezért gyors, és bármikor megismételhető.
+- **A kimenet** (az aktuális könyvtár, `SCAN.dat`, `INDEX.pck`, visszamásolt fájlok) és a
+  PhotoRec kimenete is **másik lemezre** kerüljön.
 
 ### Működés lépésenként
 
-**1. MFT-rekordok keresése** ([lsindx.py:201-208](lsindx.py:201)) – az image-et 1024 bájtos
-lépésekben olvassa, és minden `FILE` szignatúrájú rekordot feldolgoz (`parse_MFT`):
+A szkennelés (`scan_device`, [lsindx.py:230](lsindx.py:230)) után a feldolgozás így halad:
+
+**1. MFT-rekordok feldolgozása** ([lsindx.py:295-297](lsindx.py:295)) – a `SCAN.dat` minden
+`FILE` rekordját feldolgozza (`parse_MFT`):
 
 - Ellenőrzi a méreteket, és elvégzi a *fixup* (update sequence) javítást: az NTFS minden
   szektor utolsó 2 bájtját egy ellenőrző értékre cseréli, az eredetit a rekord fejlécében
@@ -132,8 +190,8 @@ lépésekben olvassa, és minden `FILE` szignatúrájú rekordot feldolgoz (`par
 - A fájlok a `filedata[méret]` listába, a könyvtárak a `dirlist[MFT#] = (név, szülő)`
   szótárba kerülnek.
 
-**2. INDX blokkok keresése** ([lsindx.py:210-216](lsindx.py:210)) – 4096 bájtos lépésekben
-keresi az `INDX` szignatúrát (`parseindx`):
+**2. INDX blokkok feldolgozása** ([lsindx.py:299-301](lsindx.py:299)) – a `SCAN.dat`
+minden `INDX` rekordját feldolgozza (`parseindx`):
 
 - Fixup-javítás mind a 8 szektorra; hiba esetén „CRC error!” és a blokk kimarad.
 - A bejegyzéseket a blokk **teljes foglalt méretéig** olvassa, nem csak a használt rész
@@ -154,32 +212,32 @@ keresi az `INDX` szignatúrát (`parseindx`):
   Ez az `offs` a `part_start` helyes értéke. Érdemes először egy próbafutással ezt
   kideríteni, beállítani, és csak utána futtatni élesben.
 
-**3. Könyvtárfa felépítése** ([lsindx.py:222-238](lsindx.py:222)) – `get_path` a szülő-láncot
+**3. Könyvtárfa felépítése** ([lsindx.py:307-323](lsindx.py:307)) – `get_path` a szülő-láncot
 a gyökérig (MFT#5, amelynek neve `.`) követi, és `os.makedirs`-szel létrehozza. Ha a lánc egy
 ismeretlen könyvtárnál megszakad, annak helyén `dir__<MFT#>` nevű mappa jön létre.
 
-**4. Fájllista** ([lsindx.py:240-243](lsindx.py:240)) – az 1024 bájtnál nagyobb fájlokat
+**4. Fájllista** ([lsindx.py:325-328](lsindx.py:325)) – az 1024 bájtnál nagyobb fájlokat
 méret szerint rendezve kiírja a logba:
 
 ```
 <méret> <unix idő> <fájl MFT#>/<szülő MFT#> "<útvonal/név>"
 ```
 
-**5. `INDEX.pck` mentése** ([lsindx.py:245-249](lsindx.py:245)) – előtte a kis fájlok
+**5. `INDEX.pck` mentése** ([lsindx.py:330-334](lsindx.py:330)) – előtte a kis fájlok
 szülőkönyvtáraihoz is létrehozza az útvonalat, lásd lent.
 
-**6. Visszamásolás** ([lsindx.py:251-262](lsindx.py:251)) – az `mftfiles` fájljait a
+**6. Visszamásolás** – csak `--restore` esetén ([lsindx.py:344](lsindx.py:344)). A
+`SCAN.pos`-ban tárolt eszközt nyitja meg, csak olvasásra. Az `mftfiles` fájljait a
 run-listájuk alapján kimásolja a helyükre, a méretre vágja, és beállítja a módosítási időt.
 Log: `COPY <bájt> bytes to <útvonal>  (<n> runs)`.
 
-**7. Nullázás** ([lsindx.py:264-273](lsindx.py:264)) – a visszamásolt fájlok klasztereit
-nullákkal felülírja az image-ben (a sparse futásokat kihagyja). Log:
-`DELETE <bájt> bytes of <útvonal>`.
+**7. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:358](lsindx.py:358)).
+Az összes MFT alapján visszaállítható fájl klasztereit nullákkal felülírja az eszközön (a
+sparse futásokat kihagyja). Log: `DELETE <bájt> bytes of <útvonal>`.
 
-Az írás maga (`f.write(bytes(BLKSIZE*rl))`) **ki van kommentezve**, így alapból csak a
-`DELETE` sorok jelennek meg, az image nem változik. Kettős védelem van rajta: a sort vissza
-kell állítani (`#### WARNING` megjegyzés alatt), **és** a megnyitást `r+b`-re kell átírni.
-Csak az image másolatán szabad bekapcsolni.
+> ⚠️ A törlés nem olvassa újra sem a mentést, sem a lemezt, és a `--restore` másolatait sem
+> ellenőrzi. Ezért előtte a mentést ellenőrizni kell. Ha egy fájl visszamásolása nem
+> sikerült, a lemezen lévő adata a törléssel végleg elvész.
 
 ### Az `INDEX.pck` formátuma
 

@@ -1,13 +1,22 @@
 #! /usr/local/bin/pypy3
 
 import os
+import sys
+import json
+import time
+import struct
 import pickle
 
 BLKSIZE=4096
 MFTSIZE=1024
 
+SCANCHUNK=1024*1024          # egyszerre ennyit olvas az eszkozrol (BLKSIZE tobbszorose legyen!)
+SCANCHECKPOINT=1024*1024*1024 # ennyi olvasas utan menti a folytatashoz szukseges allapotot
+SCANFILE="SCAN.dat"          # a talalt FILE/INDX rekordok nyersen: fpos(8)+meret(4)+data
+SCANPOS="SCAN.pos"           # checkpoint (json): meddig jutott a scan, es mekkora volt ekkor a SCANFILE
+
 part_start=0 #0x7000+0xE00 #63*512
-device="/home/mentes-pd16g/raw3x.img"
+# az eszkozt/image-et a --scandisk kapcsoloval kell megadni, a SCAN.pos-ban eltarolja
 
 filedata={}
 dirlist={}
@@ -196,24 +205,105 @@ def parseindx(data,fpos=0,debug=False):
 
         o+=s
 
-f=open(device,"r+b")
+# 1. menet: a teljes eszkoz egyszeri vegigolvasasa nagy blokkokban, a FILE (MFT) es INDX
+#    rekordokat nyersen kiirjuk a SCANFILE-ba:  fpos (8 byte) + meret (4 byte) + data
+#    Megszakadas eseten a SCANPOS alapjan onnan folytatja, ahol az utolso checkpoint volt.
+# 2. menet: a SCANFILE-bol dolgozik a parse_MFT es parseindx (a lemezt mar nem kell olvasni).
+
+USAGE="""usage:
+  %(p)s --scandisk <device|image>   scan the disk, create/resume %(sf)s
+  %(p)s [--restore [--delete-from-device]]
+        parse %(sf)s, rebuild the tree, write INDEX.pck
+        --restore             copy the files with intact MFT records from the device (read-only)
+        --delete-from-device  ZERO the clusters of the restorable files ON THE DEVICE!"""%{"p":sys.argv[0],"sf":SCANFILE}
+
+def load_scanpos(device=None):
+    try:
+        with open(SCANPOS) as fp: st=json.load(fp)
+    except FileNotFoundError:
+        return {"device":device,"pos":0,"outsize":0,"done":False} if device else None
+    if device and st["device"]!=device:
+        sys.exit("%s egy masik eszkozhoz tartozik (%s)! torold a %s es %s fileokat az ujrakezdeshez."%(SCANPOS,st["device"],SCANFILE,SCANPOS))
+    return st
+
+def save_scanpos(st):
+    with open(SCANPOS+".tmp","w") as fp: json.dump(st,fp)
+    os.replace(SCANPOS+".tmp",SCANPOS) # atomi csere, hogy megszakadaskor se legyen felig irt checkpoint
+
+def scan_device(device):
+    assert SCANCHUNK%BLKSIZE==0 and BLKSIZE%MFTSIZE==0 # igy egy rekord sosem log at a kovetkezo blokkba
+    device=os.path.abspath(device)
+    st=load_scanpos(device)
+    if st["done"]: print("SCAN: %s mar kesz (%s)."%(SCANFILE,device),file=sys.stderr) ; return
+    if st["outsize"] and (not os.path.exists(SCANFILE) or os.path.getsize(SCANFILE)<st["outsize"]):
+        sys.exit("A %s hianyzik vagy rovidebb, mint a %s szerint kellene! torold mindkettot az ujrakezdeshez."%(SCANFILE,SCANPOS))
+    f=open(device,"rb")   # CSAK OLVASAS!
+    devsize=f.seek(0,2) # blokkeszkoznel az os.path.getsize() 0-t adna
+    out=open(SCANFILE,"ab")
+    out.truncate(st["outsize"])  # az utolso checkpoint utan irt (esetleg felig kiirt) rekordok eldobasa
+    out.seek(st["outsize"])
+    fpos=st["pos"]
+    if fpos: print("SCAN: resume at 0x%X (%d MB)"%(fpos,fpos>>20),file=sys.stderr)
+    f.seek(fpos)
+    lastcp=fpos
+    t0=time.time() ; p0=fpos
+    nfile=nindx=0
+    while True:
+        data=f.read(SCANCHUNK)
+        n=len(data)-len(data)%MFTSIZE # csak teljes rekordok (mint regen: a vegen levo csonka blokk kimarad)
+        for sig,rsize in ((b'FILE',MFTSIZE),(b'INDX',BLKSIZE)):
+            i=data.find(sig)
+            while 0<=i and i+rsize<=n:
+                if i%rsize==0:
+                    out.write(struct.pack("<QI",fpos+i,rsize)) ; out.write(data[i:i+rsize])
+                    if rsize==MFTSIZE: nfile+=1
+                    else: nindx+=1
+                i=data.find(sig,i+1)
+        fpos+=len(data)
+        eof=len(data)<SCANCHUNK
+        if eof or fpos-lastcp>=SCANCHECKPOINT:
+            out.flush() ; os.fsync(out.fileno())
+            st.update(pos=fpos,outsize=out.tell(),done=eof)
+            save_scanpos(st)
+            lastcp=fpos
+            dt=time.time()-t0
+            print("SCAN: %d/%d MB (%.1f%%)  %.0f MB/s  FILE=%d INDX=%d"%(fpos>>20,devsize>>20,100.0*fpos/max(devsize,1),
+                  (fpos-p0)/(1<<20)/max(dt,0.001),nfile,nindx),file=sys.stderr)
+        if eof: break
+    out.close()
+    f.close()
+    print("SCAN: kesz.",file=sys.stderr)
+
+def read_scanfile():
+    with open(SCANFILE,"rb") as sf:
+        while True:
+            hdr=sf.read(12)
+            if len(hdr)<12: break
+            fpos,rsize=struct.unpack("<QI",hdr)
+            yield fpos,sf.read(rsize)
+
+args=sys.argv[1:]
+if len(args)==2 and args[0]=="--scandisk":
+    scan_device(args[1])
+    sys.exit(0)
+opt_restore="--restore" in args
+opt_delete="--delete-from-device" in args
+if set(args)-{"--restore","--delete-from-device"}: sys.exit(USAGE)
+
+st=load_scanpos()
+if not st or not os.path.exists(SCANFILE):
+    sys.exit("Nincs %s ebben a konyvtarban. Eloszor a lemezt kell vegigolvasni:\n\n%s"%(SCANFILE,USAGE))
+if not st["done"]:
+    sys.exit("A %s meg nem teljes (%d MB-ig jutott). Folytatas:\n  %s --scandisk %s"%(SCANFILE,st["pos"]>>20,sys.argv[0],st["device"]))
+device=st["device"]
 
 # find FILE (MFT) entries:
-#fpos=0xC0000000 ; f.seek(fpos)
-fpos=0; f.seek(fpos)
-while True:
-    data=f.read(MFTSIZE)
-    if not data or len(data)<MFTSIZE: break # EOF
+for fpos,data in read_scanfile():
     if data[0:4]==b'FILE': parse_MFT(data,fpos)
-    fpos+=len(data)
 
 # find INDX (dir) entries:
-fpos=0 ; f.seek(fpos)
-while True:
-    data=f.read(BLKSIZE)
-    if not data or len(data)<BLKSIZE: break # EOF
+for fpos,data in read_scanfile():
     if data[0:4]==b'INDX': parseindx(data,fpos)
-    fpos+=len(data)
 
 #exit(0)
 
@@ -248,8 +338,12 @@ for k in filedata:
 
 pickle.dump((filedata,dirmap),open("INDEX.pck","wb"))
 
+# --restore / --delete-from-device nelkul az eszkozt meg sem nyitjuk, --delete-from-device nelkul csak olvasasra!
+if opt_restore or opt_delete: f=open(device,"r+b" if opt_delete else "rb")
+
 # restore files:
-for mft in mftfiles:
+if opt_restore:
+  for mft in mftfiles:
     fnev,parent,fs,tt,runs = mftfiles[mft]
     fn=get_path(parent)+"/"+fnev
     print("COPY %d bytes to %s  (%d runs)"%(fs,fn,len(runs)))
@@ -262,7 +356,8 @@ for mft in mftfiles:
     if tt: os.utime(fn, (tt,tt))
 
 # delete files:
-for mft in mftfiles:
+if opt_delete:
+  for mft in mftfiles:
     fnev,parent,fs,tt,runs = mftfiles[mft]
     fn=get_path(parent)+"/"+fnev
     print("DELETE %d bytes of %s  (%d runs)"%(fs,fn,len(runs)))
@@ -270,4 +365,4 @@ for mft in mftfiles:
         if not ro: continue # sparse run: nincs mit torolni (es a boot szektort se nullazzuk!)
         f.seek(part_start+BLKSIZE*ro)
 #### WARNING !!! this line ZEROES all the recovered files in the source image !!! use with CAUTION!!! ####
-#        f.write(bytes(BLKSIZE*rl))
+        f.write(bytes(BLKSIZE*rl))
