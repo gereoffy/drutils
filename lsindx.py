@@ -269,4 +269,5 @@ for mft in mftfiles:
     for ro,rl in runs:
         if not ro: continue # sparse run: nincs mit torolni (es a boot szektort se nullazzuk!)
         f.seek(part_start+BLKSIZE*ro)
-        f.write(bytes(BLKSIZE*rl))
+#### WARNING !!! this line ZEROES all the recovered files in the source image !!! use with CAUTION!!! ####
+#        f.write(bytes(BLKSIZE*rl))
