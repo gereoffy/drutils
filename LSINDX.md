@@ -36,10 +36,11 @@ A tömörített fájlok és a kimentett `$MFT` alapú mentés egy külön eszkö
                    lsindx.py (a SCAN.dat-ból)
             ┌──────────────────┼──────────────────────────┐
             ▼                  ▼                          ▼
-   könyvtárfa a cwd-ben   INDEX.pck               ép MFT-rekordú fájlok
-   (üres mappák,          (méret → [név, idő,     visszamásolva a fába
-    dir__N ismeretlen      MFT#, szülő] +         (--restore), majd külön futással
-    szülőkhöz)             szülő → útvonal)       nullázva (--delete-from-device)
+   könyvtár- és           INDEX.pck               ép MFT-rekordú fájlok
+   fájllista (stdout,     (méret → [név, idő,     visszamásolva a fába
+   „find .” szerűen,      MFT#, szülő] +         (--restore), majd külön futással
+   dir__N ismeretlen      szülő → útvonal)       nullázva (--delete-from-device)
+   szülőkhöz)
                                │                          │
                                │                          ▼
                                │              PhotoRec (TestDisk) raw scan
@@ -55,7 +56,7 @@ A tömörített fájlok és a kimentett `$MFT` alapú mentés egy külön eszkö
 A nullázás célja, hogy a nyers szkennelés már csak azokat a fájlokat találja meg,
 amelyeket az MFT alapján nem sikerült névvel együtt visszaállítani – így kevesebb a duplikátum
 és a hamis párosítás. A nullázás csak a `--delete-from-device` kapcsolóval történik meg,
-lásd a 7. lépést.
+lásd a 8. lépést.
 
 ---
 
@@ -63,7 +64,7 @@ lásd a 7. lépést.
 
 ### Beállítás
 
-A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-23](lsindx.py:10)):
+A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-26](lsindx.py:10)):
 
 | Változó | Alapérték | Jelentés |
 |---|---|---|
@@ -77,6 +78,8 @@ A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-23](lsindx
 | `SCANCHECKPOINT` | 1 GiB | Ennyi olvasás után menti a folytatáshoz szükséges állapotot. |
 | `SCANFILE` | `SCAN.dat` | A megtalált `FILE`/`INDX` rekordok nyers másolata. |
 | `SCANPOS` | `SCAN.pos` | A szkennelés állapota (JSON): eszköz, meddig jutott, mekkora ekkor a `SCAN.dat`. |
+| `SCANBAD` | `SCAN.bad` | Az olvashatatlan, nullával pótolt tartományok listája (`pozíció hossz` soronként). |
+| `SCANERRBLK` | 4 KiB | Olvasási hibánál ekkora lépésekben olvassa a blokkot előre, majd visszafelé a hibáig. |
 | `part_start` | `0` | A partíció kezdete az eszközön/image-ben bájtban (lásd lent, hogyan derül ki). |
 
 Az eszközt vagy image-et nem a kódban kell megadni, hanem a `--scandisk` kapcsolóval.
@@ -93,15 +96,15 @@ lsindx.py [--restore] [--delete-from-device]
 
 | Kapcsoló | Mit csinál | Eszköz megnyitása |
 |---|---|---|
-| *(nincs)* | Könyvtárfa, fájllista, `INDEX.pck`. | nem nyitja meg |
-| `--restore` | Ezen felül visszamásolja az ép MFT-rekordú fájlokat (6. lépés). | csak olvasásra (`rb`) |
-| `--delete-from-device` | Kinullázza az MFT alapján visszaállítható fájlok klasztereit (7. lépés), ellenőrzés nélkül. | **írásra** (`r+b`) |
+| *(nincs)* | Könyvtár- és fájllista az stdout-ra, `INDEX.pck`. Semmit nem hoz létre a lemezen. | nem nyitja meg |
+| `--restore` | Ezen felül létrehozza a könyvtárfát, és visszamásolja az ép MFT-rekordú fájlokat (7. lépés). | csak olvasásra (`rb`) |
+| `--delete-from-device` | Kinullázza az MFT alapján visszaállítható fájlok klasztereit (8. lépés), ellenőrzés nélkül. | **írásra** (`r+b`) |
 
 A két kapcsoló együtt is megadható, de a javasolt menet az, hogy előbb csak `--restore`-ral
 futtatod, **ellenőrzöd a mentést**, és csak utána, külön futással jön a
 `--delete-from-device`. A törlés nem másol újra semmit, és a másolatokat sem ellenőrzi.
 
-**1. Szkennelés** (`scan_device`, [lsindx.py:245](lsindx.py:245)) – a lemezt **egyetlen
+**1. Szkennelés** (`scan_device`, [lsindx.py:277](lsindx.py:277)) – a lemezt **egyetlen
 menetben**, 1 MiB-os blokkokban olvassa végig. Minden blokkban megkeresi az 512 bájtra
 igazított rekordokat:
 
@@ -138,6 +141,7 @@ A haladást az stdout-ra írja, gigabájtonként egy karakterrel:
 | `I` | INDX-rekord, `FILE` rekord nélkül |
 | `.` | van benne adat, de nem talált rekordot |
 | `0` | csupa nulla |
+| `X` | olvasási hiba volt benne (lásd `SCAN.bad`) |
 
 64 karakterenként új sort kezd, amelynek elején a pozíció áll GB-ban. A sor végére a
 haladást, a sebességet és az addig talált rekordok számát írja:
@@ -161,8 +165,22 @@ Tetszőleges alkalommal megismételhető, például a kód vagy a
 `part_start` módosítása után:
 
 ```bash
-pypy3 ../lsindx.py > lsindx.log
+pypy3 ../lsindx.py > lista.txt 2> lsindx.log
 ```
+
+Az stdout-ra a `find .` kimenetéhez hasonló, rendezett listát ír: minden könyvtárat és fájlt
+egy sorban, a teljes útvonalával. A gyökér `.`, ismeretlen szülőnél az útvonal `dir__<MFT#>`-mal
+kezdődik:
+
+```
+./Windows/System32/drivers/etc
+./Windows/System32/drivers/etc/hosts
+dir__110037/...
+```
+
+A DOS 8.3 álneveket (`PROGRA~1`) kihagyja, ha a fájlnak a hosszú neve is ismert. A
+diagnosztikai kiírások (`MFT#...`, `CRC error`, `BOOT`, a könyvtárlista MFT-számokkal, a
+mérettel és dátummal bővített fájllista, `COPY`, `DELETE`) a hibakimenetre kerülnek.
 
 Ha nincs `SCAN.dat`, kiírja, hogyan kell létrehozni. Ha a szkennelés még nem fejeződött be,
 kiírja a folytatás parancsát.
@@ -174,8 +192,8 @@ kiírja a folytatás parancsát.
 > **másolatán** szabad használni, soha nem az eredeti lemezen.
 >
 
-> ⚠️ A könyvtárfát és a fájlokat az **aktuális könyvtárba** hozza létre, ezért üres
-> munkakönyvtárból indítsd.
+> ⚠️ A `--restore` a könyvtárfát és a fájlokat az **aktuális könyvtárba** hozza létre, ezért
+> üres munkakönyvtárból indítsd.
 
 ### Használat közvetlenül az eredeti lemezen
 
@@ -198,8 +216,21 @@ csak olvassa, de a lemezt így is óvni kell:
 - **Az állapot ellenőrzése előtte** (`smartctl -a /dev/sdX`): fizikailag hibás lemeznél
   minden teljes olvasás további kockázat. A szkript egyetlen menetben olvassa végig az
   eszközt, a PhotoRec pedig egy második alkalommal.
-- **Megszakadás, olvasási hiba:** egy olvashatatlan szektornál a `read` kivételt dob, és a
-  szkennelés leáll. A futás a legutóbbi gigabájtos mentéstől folytatható.
+- **Olvasási hiba (bad sector):** ha egy 1 MiB-os blokk olvasása I/O hibát ad, a szkennelés
+  nem áll le. A ddrescue-hoz hasonlóan a blokkot előbb az elejétől előre, majd a végétől
+  visszafelé olvassa 4 KiB-os lépésekben, közvetlen `pread` hívásokkal, mindkét irányban
+  az első hibáig. A kettő közötti részt nem próbálja olvasni, hanem nullával tölti ki. Egy
+  hibás blokk így legfeljebb két sikertelen 4 KiB-os olvasásba kerül, akárhány rossz szektor
+  van benne, a blokk két szélén lévő jó adat pedig megmarad. Egy magányos rossz szektor csak
+  4 KiB-ot, vagyis pár MFT-rekordot vagy egy INDX blokkot visz el. A nullával pótolt
+  tartományokat a `SCAN.bad`-be írja, a progressben `X` jelzi őket. A sor végi statisztikában
+  `BAD=... KB` áll, a végén pedig a hibakimenetre kerül az összesítés. A sérült rekordok
+  bekerülnek a `SCAN.dat`-ba, a feldolgozás a fixup-ellenőrzésnél kiszűri őket (`CRC error`).
+  Rossz szektoros lemeznél minden olvasás további kockázat, és a hibás blokkok újraolvasása
+  lassú lehet.
+- **Megszakadás:** a futás a legutóbbi gigabájtos mentéstől folytatható. A `SCAN.bad`-hez
+  ilyenkor hozzáír, így a mentés és a leállás közötti hibás tartományok kétszer is
+  szerepelhetnek benne.
 - **Futásidő:** 4 TB-nál a szkennelés sok óra. A feldolgozás már csak a `SCAN.dat`-ot
   olvassa, ezért gyors, és bármikor megismételhető.
 - **A kimenet** (az aktuális könyvtár, `SCAN.dat`, `INDEX.pck`, visszamásolt fájlok) és a
@@ -209,7 +240,7 @@ csak olvassa, de a lemezt így is óvni kell:
 
 A szkennelés után a feldolgozás így halad:
 
-**0. Boot szektorok** ([lsindx.py:345](lsindx.py:345)) – a `SCAN.dat`-ban talált összes NTFS
+**0. Boot szektorok** ([lsindx.py:390](lsindx.py:390)) – a `SCAN.dat`-ban talált összes NTFS
 boot szektor adatait kiírja: szektorméret, klaszterméret, MFT- és INDX-rekordméret, kötetméret,
 az MFT klaszterszáma, valamint a belőle adódó `part_start`. Ez utóbbi a boot szektor
 pozíciója, ha az első boot szektorról van szó. Ha a tartalékról, akkor a pozíció mínusz a
@@ -229,7 +260,7 @@ Ezek egy korábbi partícióhoz tartoznak (pl. Recovery vagy EFI), vagy más sze
 `SCAN.dat`, így egy korábbi partíció is feldolgozható, a `part_start` átállításával. A
 partíció végével a szkript nem foglalkozik, a lemez végéig minden rekordot feldolgoz.
 
-**1. MFT-rekordok feldolgozása** ([lsindx.py:356-358](lsindx.py:356)) – a `SCAN.dat` minden
+**1. MFT-rekordok feldolgozása** ([lsindx.py:401-403](lsindx.py:401)) – a `SCAN.dat` minden
 `FILE` rekordját feldolgozza (`parse_MFT`):
 
 - Ellenőrzi a méreteket, és elvégzi a *fixup* (update sequence) javítást: az NTFS minden
@@ -246,7 +277,7 @@ partíció végével a szkript nem foglalkozik, a lemez végéig minden rekordot
 - A fájlok a `filedata[méret]` listába, a könyvtárak a `dirlist[MFT#] = (név, szülő)`
   szótárba kerülnek.
 
-**2. INDX blokkok feldolgozása** ([lsindx.py:360-362](lsindx.py:360)) – a `SCAN.dat`
+**2. INDX blokkok feldolgozása** ([lsindx.py:405-407](lsindx.py:405)) – a `SCAN.dat`
 minden `INDX` rekordját feldolgozza (`parseindx`):
 
 - Fixup-javítás mind a 8 szektorra; hiba esetén „CRC error!” és a blokk kimarad.
@@ -268,26 +299,34 @@ minden `INDX` rekordját feldolgozza (`parseindx`):
   Ez az `offs` a `part_start` helyes értéke. Érdemes először egy próbafutással ezt
   kideríteni, beállítani, és csak utána futtatni élesben.
 
-**3. Könyvtárfa felépítése** ([lsindx.py:368-384](lsindx.py:368)) – `get_path` a szülő-láncot
-a gyökérig (MFT#5, amelynek neve `.`) követi, és `os.makedirs`-szel létrehozza. Ha a lánc egy
-ismeretlen könyvtárnál megszakad, annak helyén `dir__<MFT#>` nevű mappa jön létre.
+**3. Könyvtárfa felépítése** ([lsindx.py:413-432](lsindx.py:413)) – `get_path` a szülő-láncot
+a gyökérig (MFT#5, amelynek neve `.`) követi. Ha a lánc egy ismeretlen könyvtárnál megszakad
+vagy hurokba fut, annak helyén `dir__<MFT#>` áll. A könyvtárakat csak `--restore` esetén hozza
+létre (`os.makedirs`).
 
-**4. Fájllista** ([lsindx.py:386-389](lsindx.py:386)) – az 1024 bájtnál nagyobb fájlokat
-méret szerint rendezve kiírja a logba:
+Egy könyvtár nevét az MFT-rekordja és a szülő INDX blokkja is megadhatja, sokszor hosszú és
+DOS 8.3 névvel is. Mindig a hosszú név nyer: az MFT-ből vagy az INDX-ből kapott DOS nevet
+egy később talált hosszú név felülírja.
+
+**4. Fájllista a naplóba** ([lsindx.py:434-437](lsindx.py:434)) – az 1024 bájtnál nagyobb
+fájlokat méret szerint rendezve kiírja a hibakimenetre:
 
 ```
 <méret> <unix idő> <fájl MFT#>/<szülő MFT#> "<útvonal/név>"
 ```
 
-**5. `INDEX.pck` mentése** ([lsindx.py:391-395](lsindx.py:391)) – előtte a kis fájlok
-szülőkönyvtáraihoz is létrehozza az útvonalat, lásd lent.
+**5. `INDEX.pck` mentése** ([lsindx.py:439-443](lsindx.py:439)) – előtte a kis fájlok
+szülőkönyvtáraihoz is kiszámolja az útvonalat, lásd lent.
 
-**6. Visszamásolás** – csak `--restore` esetén ([lsindx.py:400](lsindx.py:400)). A
+**6. Könyvtár- és fájllista** ([lsindx.py:445-457](lsindx.py:445)) – a `find .`-szerű lista az
+stdout-ra (lásd a Futtatásnál).
+
+**7. Visszamásolás** – csak `--restore` esetén ([lsindx.py:462](lsindx.py:462)). A
 `SCAN.pos`-ban tárolt eszközt nyitja meg, csak olvasásra. Az `mftfiles` fájljait a
 run-listájuk alapján kimásolja a helyükre, a méretre vágja, és beállítja a módosítási időt.
 Log: `COPY <bájt> bytes to <útvonal>  (<n> runs)`.
 
-**7. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:414](lsindx.py:414)).
+**8. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:476](lsindx.py:476)).
 Az összes MFT alapján visszaállítható fájl klasztereit nullákkal felülírja az eszközön (a
 sparse futásokat kihagyja). Log: `DELETE <bájt> bytes of <útvonal>`.
 
@@ -305,8 +344,8 @@ filedata, dirmap = pickle.load(open("INDEX.pck", "rb"))
   ismert fájlok listája, elemenként `(méret, név, mtime_unix, fájl_MFT#, szülő_MFT#)`.
   Ugyanaz a fájl többször is szerepelhet (MFT-ből és INDX-ből is, illetve hosszú és DOS
   8.3 névvel is).
-- `dirmap`: `dict[int, str]` – szülő MFT# → a létrehozott könyvtár relatív útvonala.
-  A `filedata` összes fájljának szülőkönyvtára benne van (a könyvtárak létre is jönnek).
+- `dirmap`: `dict[int, str]` – szülő MFT# → a könyvtár relatív útvonala.
+  A `filedata` összes fájljának szülőkönyvtára benne van.
   Ha a szülő-lánc megszakad, az útvonal `dir__<MFT#>`-mal kezdődik.
 
 Az `INDEX.pck`-t az [indxrename.py](#indxrenamepy) használja fel.
@@ -340,7 +379,8 @@ pip3 install olefile
 ### Futtatás
 
 Az `lsindx.py` **kimeneti könyvtárában** kell futtatni: itt van az `INDEX.pck`, és a
-`dirmap`-ben tárolt relatív útvonalak (a már létrehozott könyvtárfa) is innen érvényesek.
+`dirmap`-ben tárolt relatív útvonalak is innen érvényesek. A célkönyvtárat átnevezés előtt
+maga hozza létre, előre létrehozott könyvtárfa nem kell.
 A párosítandó fájlokat parancssori argumentumként kapja:
 
 ```

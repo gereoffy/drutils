@@ -11,13 +11,15 @@ BLKSIZE=4096
 MFTSIZE=1024
 
 SCANCHUNK=1024*1024          # egyszerre ennyit olvas az eszkozrol (512 tobbszorose, es nagyobb mint SCANMAXREC!)
-SCANPROGRESS=1024*1024*1024  # ennyi byte-onkent egy progress karakter az stdout-ra (M=mft lanc m=kosza mft I=indx 0=ures .=egyeb)
+SCANPROGRESS=1024*1024*1024  # ennyi byte-onkent egy progress karakter az stdout-ra (M=mft lanc m=kosza mft I=indx 0=ures .=egyeb X=olvasasi hiba)
 SCANCHAIN=64                 # ennyi egymas utani (1024 byte-onkent egyesevel novo MFT#) FILE rekord mar "M" (MFT lanc), a kevesebb "m"
 SCANLINE=64                  # ennyi progress karakter utan uj sor (statisztikaval)
 SCANALIGN=512                # a FILE/INDX/NTFS rekordokat ennyire igazitva keresi
 SCANMAXREC=65536             # legnagyobb elfogadott rekordmeret, ennyi atfedessel olvas (blokkhataron atlogo rekordok)
 SCANCHECKPOINT=1024*1024*1024 # ennyi olvasas utan menti a folytatashoz szukseges allapotot
 SCANFILE="SCAN.dat"          # a talalt FILE/INDX/boot rekordok nyersen: fpos(8)+meret(4)+data
+SCANBAD="SCAN.bad"           # olvashatatlan (nullaval potolt) tartomanyok listaja: "pozicio hossz" soronkent
+SCANERRBLK=4096              # olvasasi hibanal ekkora lepesekben olvassa a blokkot elore, majd visszafele a hibaig
 SCANPOS="SCAN.pos"           # checkpoint (json): meddig jutott a scan, es mekkora volt ekkor a SCANFILE
 
 part_start=0 #0x7000+0xE00 #63*512
@@ -27,6 +29,10 @@ filedata={}
 dirlist={}
 dirmap={}
 mftfiles={}
+dosnames=set()  # (MFT#, szulo, nev): csak DOS 8.3 nevek (a listazasbol kimaradnak, ha van hosszu nev is)
+dosdirs=set()   # azok a konyvtarak (MFT#), amiknek eddig csak DOS nevet talaltunk
+
+def log(*a): print(*a,file=sys.stderr) # diagnosztika a stderr-re, a stdout-on csak a listazas legyen
 
 # start of INDX entries data, as retrieved from INDX and MFT records:
 mftpos={}
@@ -45,29 +51,30 @@ def parse_MFT(data,fpos=0,debug=False):
     size=getint(24,4)  # Used entry size
     size2=getint(28,4) # Total entry size
     if size2!=MFTSIZE or size<32 or size>size2 or size>len(data):
-        if debug: print("MFT#%d: bad size %d/%d/%d"%(mft,size,size2,len(data)))
+        if debug: log("MFT#%d: bad size %d/%d/%d"%(mft,size,size2,len(data)))
         return # bad size
 
-    print("MFT#%d: fpos=0x%X  size=%d/%d offs=0x%X flags=0x%X seq=%d refcnt=%d"%(mft,fpos,size,size2,o,flags,seqnum,refcnt))
+    log("MFT#%d: fpos=0x%X  size=%d/%d offs=0x%X flags=0x%X seq=%d refcnt=%d"%(mft,fpos,size,size2,o,flags,seqnum,refcnt))
     if not (flags&1): return  # MFT_RECORD_IN_USE
     
     # The question is what happened to the original data that was located at offset 510 in both of those sectors?
     # https://dtidatarecovery.com/ntfs-master-file-table-fixup/
     fixo=getint(4,2)
     fixl=getint(6,2)
-    if (fixl-1) != (size2//512): print("BAD fixup size!",fixl,fixo) ; return
+    if (fixl-1) != (size2//512): log("BAD fixup size!",fixl,fixo) ; return
     fix1=data[510:512]
     fix2=data[512+510:512+512]
-#    print("  fixup offs=0x%X size=%d data:"%(fixo,fixl), data[fixo:o].hex(' '), "Sect1:", fix1.hex(' '), "Sect2:", fix2.hex(' ') )  #   47136   fixup offs=0x30 size=3
+#    log("  fixup offs=0x%X size=%d data:"%(fixo,fixl), data[fixo:o].hex(' '), "Sect1:", fix1.hex(' '), "Sect2:", fix2.hex(' ') )  #   47136   fixup offs=0x30 size=3
     if data[fixo:fixo+2]==fix1: # and fix1==fix2:
-        if fix1!=fix2: print("BAD fixup for 2nd sector!") ; return
+        if fix1!=fix2: log("BAD fixup for 2nd sector!") ; return
         data=data[:510] + data[fixo+2:fixo+4] + data[512:512+510] + data[fixo+4:fixo+6] + data[1024:] # fuck ms!
     else:
-        print("BAD fixup, NOT patching sector data...") ; return
+        log("BAD fixup, NOT patching sector data...") ; return
 
     tt=0    # datetime
     fs=0    # filesize
     fnev=''
+    fnev_dos=False
     parent=-1
     while o+4<=size:
         t=getsint(o,4)         # attrib type!  https://github.com/libyal/libfsntfs/blob/main/documentation/New%20Technologies%20File%20System%20(NTFS).asciidoc#6-the-attributes
@@ -80,7 +87,7 @@ def parse_MFT(data,fpos=0,debug=False):
         aflags=getint(o+12,2)  # attrib flags:  also 8 bit: compression   0x4000=encrypted   0x8000=sparse
         aid=getint(o+14,2)     # An unique identifier to distinguish between attributes that contain segmented data.
         name=data[o+no:o+no+nl*2].decode("utf_16_le",errors="ignore") #  Contains an UTF-16 little-endian without end-of-string character
-        if debug: print("  attr type=0x%02X len=%d aflags=0x%04X resident=%d aid=%d start=0x%X name='%s'"%(t,l,aflags,res,aid,o+16,name));
+        if debug: log("  attr type=0x%02X len=%d aflags=0x%04X resident=%d aid=%d start=0x%X name='%s'"%(t,l,aflags,res,aid,o+16,name));
         if l<=0 or o+l>size: break # invalid len
 
         if res==0:  # resident
@@ -88,7 +95,7 @@ def parse_MFT(data,fpos=0,debug=False):
             attoffs=getint(o+16+4,2)
 #            if t==0x10: # $STANDARD_INFORMATION
 #                tt=getint(o+attoffs+8,8) # Last modification date and time
-#                print("TIME:",tt)
+#                log("TIME:",tt)
             if t==0x30: # $FILE_NAME
                 parent=getint(o+attoffs,4)
                 tt=getint(o+attoffs+16,8) # Last modification date and time
@@ -98,8 +105,8 @@ def parse_MFT(data,fpos=0,debug=False):
                 namespc=data[o+attoffs+65] # namespace (0=posix 1=win 2=dos 3=same) # https://github.com/libyal/libfsntfs/blob/main/documentation/New%20Technologies%20File%20System%20(NTFS).asciidoc#641-namespace
                 nameoff=o+attoffs+66
                 name=data[nameoff:nameoff+namelen*2].decode("utf_16_le",errors="ignore") #  Contains an UTF-16 little-endian without end-of-string character
-                if debug: print("NAME: ",nameoff,namelen,namespc,name,parent,"SIZE:",fs,"TIME:",tt)
-                if namespc<2 or not fnev: fnev=name
+                if debug: log("NAME: ",nameoff,namelen,namespc,name,parent,"SIZE:",fs,"TIME:",tt)
+                if namespc!=2 or not fnev: fnev=name ; fnev_dos=(namespc==2)
         else:
             size1=getint(o+16+24,8) & 0x0000FFFFFFFFFFFF # Allocated data size (or allocated length).
             size2=getint(o+16+32,8) & 0x0000FFFFFFFFFFFF # Data size (or file size)  0x18 0000 0000 A1EA;
@@ -117,9 +124,9 @@ def parse_MFT(data,fpos=0,debug=False):
                 runs.append((r_cluster if r_delta else 0, r_size))
             if t==0x80 and nl==0: # $DATA (file)
                 fs=size2
-                if debug:  print("DATA: start=0x%X size=%d/%d/%d runs=%d compr=0x%X flags=0x%X %s"%(runs[0][0], BLKSIZE*r_total,size1,size2, len(runs), compr, flags, "OK" if BLKSIZE*r_total==size1 else "BAD"), rundata.hex(' '))
+                if debug:  log("DATA: start=0x%X size=%d/%d/%d runs=%d compr=0x%X flags=0x%X %s"%(runs[0][0], BLKSIZE*r_total,size1,size2, len(runs), compr, flags, "OK" if BLKSIZE*r_total==size1 else "BAD"), rundata.hex(' '))
                 if fnev and flags==1 and compr==0 and fs and BLKSIZE*r_total==size1 and BLKSIZE*r_total<1024*1024*1024: mftfiles[mft]=(fnev,parent,fs,tt,runs)
-                elif debug: print("DATA: skipping...") # TODO: implement mft reference lookup... (0x20 attr)
+                elif debug: log("DATA: skipping...") # TODO: implement mft reference lookup... (0x20 attr)
             elif t==0xA0: # $INDEX_ALLOC (dir)
                 mftpos[mft]=BLKSIZE*runs[0][0] # direntry
 
@@ -128,12 +135,14 @@ def parse_MFT(data,fpos=0,debug=False):
 
     if not (flags&2): # When this flag is set the file entry represents a directory (that contains sub file entries)
         entry=(fs,fnev,tt,mft,parent)
+        if fnev_dos: dosnames.add((mft,parent,fnev))
         try:
             filedata[fs].append(entry)
         except:
             filedata[fs]=[entry]
     else:
         dirlist[mft]=(fnev,parent)
+        if fnev_dos: dosdirs.add(mft) # az INDX-bol jovo hosszu nev majd felulirja
 
     return
 
@@ -152,7 +161,7 @@ def parseindx(data,fpos=0,debug=False):
     size=getint(28,4)
     eofs=getint(32,4)
     flag=getint(36,4)
-    if debug: print(offs,size,eofs,flag,vcn)
+    if debug: log(offs,size,eofs,flag,vcn)
     # 0x28-0x40  fixup?
 
     # The question is what happened to the original data that was located at offset 510 in both of those sectors?
@@ -162,10 +171,10 @@ def parseindx(data,fpos=0,debug=False):
         for i in range(fixl-1):
             fix1=data[i*512+510:i*512+512]
             fix2=data[i*2+fixo+2:i*2+fixo+4]
-#            print(i,fix,fix1,fix2)
+#            log(i,fix,fix1,fix2)
             if fix==fix1: data=data[:i*512+510]+fix2+data[i*512+512:] # replace fix1 by fix2
-            else: print("CRC error!",i*512) ; return
-    else: print("Bad fixup size: %d (for %d sectors)"%(fixl,len(data)//512)) ; return
+            else: log("CRC error!",i*512) ; return
+    else: log("Bad fixup size: %d (for %d sectors)"%(fixl,len(data)//512)) ; return
 
     o=24+offs
 #    e=24+eofs
@@ -177,13 +186,13 @@ def parseindx(data,fpos=0,debug=False):
         s=getint(o+8,2)    # Index value size
         n=getint(o+10,2)   # Index key data size  (gyakorlatilag o+n+16 mutat a filenev vegere)
         ifl=getint(o+12,4)  # Index value flags
-#        print("\t",o,s,n,fl,data[o+n+16:o+s].hex())
+#        log("\t",o,s,n,fl,data[o+n+16:o+s].hex())
         if n+16>=0x52:
             parent=getint(o+16,4) # Parent file reference
             if fpos and not parent in idxpos:
                 idxpos[parent]=fpos
-                if parent in mftpos: print("MFT#%d = 0x%X  vs.  0x%X    offs=0x%X"%(parent,fpos,mftpos[parent],fpos-mftpos[parent]))
-                elif debug: print("MFT#%d = 0x%X  not in MFT"%(parent,fpos))
+                if parent in mftpos: log("MFT#%d = 0x%X  vs.  0x%X    offs=0x%X"%(parent,fpos,mftpos[parent],fpos-mftpos[parent]))
+                elif debug: log("MFT#%d = 0x%X  not in MFT"%(parent,fpos))
             t=getint(o+16+16,8)   # Last modification date and time
             t//=10000000;
             t-=11644473600;
@@ -193,20 +202,21 @@ def parseindx(data,fpos=0,debug=False):
             ns=getint(o+16+65,1) #  Namespace of the name string
 #            if nl>0:
             fn=data[o+0x52:o+0x52+nl*2].decode("utf_16_le",errors="ignore") #  Contains an UTF-16 little-endian without end-of-string character
-            if debug: print("\t",o,s,n,"0x%X"%fl,t,"%d/%d"%(fref,parent),ns,fn,fs)
+            if debug: log("\t",o,s,n,"0x%X"%fl,t,"%d/%d"%(fref,parent),ns,fn,fs)
             if not (fl&0x10000000): # directory?
                 entry=(fs,fn,t,fref,parent)
+                if ns==2: dosnames.add((fref,parent,fn))
                 try:
                     filedata[fs].append(entry)
                 except:
                     filedata[fs]=[entry]
             else:
-                try:
-                    old=dirlist[fref] # check if we already has it
-                    new=(fn,parent)
-                    if old!=new: print("MFT!=INDX mismatch:",old,new)
-                except:
-                    dirlist[fref]=(fn,parent) # new entry!
+                new=(fn,parent)
+                if fref not in dirlist or (fref in dosdirs and ns!=2): # uj, vagy eddig csak DOS nevunk volt
+                    dirlist[fref]=new
+                    if ns==2: dosdirs.add(fref)
+                    else: dosdirs.discard(fref)
+                elif ns!=2 and dirlist[fref]!=new: log("MFT!=INDX mismatch:",dirlist[fref],new)
 
         o+=s
 
@@ -242,6 +252,28 @@ def recsize(buf,i,sig):
     else: return 512 # boot sector
     return n if SCANALIGN<=n<=SCANMAXREC and n&(n-1)==0 else default
 
+def read_bad(f,pos,n,badlog):
+    # olvasasi hiba utan (ddrescue-szeruen): a blokkot az elejetol elore, majd a vegetol visszafele
+    # olvassuk SCANERRBLK darabokban az elso hibaig; a ketto kozotti (hibas) reszt nem probaljuk olvasni, nulla marad.
+    # Igy egy hibas blokk legfeljebb 2 sikertelen olvasasba kerul, akarhany rossz szektor van benne.
+    out=bytearray(n)
+    lo=0
+    while lo<n:
+        k=min(SCANERRBLK,n-lo)
+        try: d=os.pread(f.fileno(),k,pos+lo)
+        except OSError: break
+        out[lo:lo+len(d)]=d ; lo+=k
+    hi=n
+    while hi>lo:
+        s=max(lo,hi-SCANERRBLK)
+        try: d=os.pread(f.fileno(),hi-s,pos+s)
+        except OSError: break
+        out[s:s+len(d)]=d ; hi=s
+    bad=[[pos+lo,hi-lo]] if hi>lo else []
+    for bp,bl in bad: badlog.write("0x%X %d\n"%(bp,bl))
+    badlog.flush()
+    return bytes(out),bad
+
 def scan_device(device):
     assert SCANCHUNK%SCANALIGN==0 and SCANCHUNK>SCANMAXREC
     device=os.path.abspath(device)
@@ -263,6 +295,8 @@ def scan_device(device):
     cnt={b'FILE':0,b'INDX':0,b'NTFS':0}
     chain=[-1,-1,0,0]         # MFT lanc: utolso FILE pozicio, utolso MFT#, lanc kezdo pozicio, lanc hossz
     marks={}                  # progress: GB index -> "M"/"I"/"." (ami nincs benne, az csupa 0 volt)
+    errs=set()                # progress: GB indexek, ahol olvasasi hiba volt
+    badlog=open(SCANBAD,"a") ; nbad=0
     shown=sgb=base//SCANPROGRESS  # a kovetkezo kiirando progress karakter GB indexe (sgb: ahonnan most indultunk)
     rpos=base                 # olvasasi pozicio
     zero=bytes(SCANCHUNK)
@@ -270,15 +304,24 @@ def scan_device(device):
         nonlocal shown
         while shown<upto:
             if (shown-sgb)%SCANLINE==0: sys.stdout.write("%8d GB "%(shown*SCANPROGRESS>>30))
-            sys.stdout.write(marks.pop(shown,"0"))
+            c=marks.pop(shown,"0")
+            sys.stdout.write("X" if shown in errs else c)
             shown+=1
             if (shown-sgb)%SCANLINE==0 or shown*SCANPROGRESS>=devsize:
                 dt=time.time()-t0
-                sys.stdout.write("  %d/%d GB  %.0f MB/s  FILE=%d INDX=%d NTFS=%d\n"%(min(shown*SCANPROGRESS,devsize)>>30,devsize>>30,
-                    (min(shown*SCANPROGRESS,devsize)-p0)/(1<<20)/max(dt,0.001),cnt[b'FILE'],cnt[b'INDX'],cnt[b'NTFS']))
+                sys.stdout.write("  %d/%d GB  %.0f MB/s  FILE=%d INDX=%d NTFS=%d%s\n"%(min(shown*SCANPROGRESS,devsize)>>30,devsize>>30,
+                    (min(shown*SCANPROGRESS,devsize)-p0)/(1<<20)/max(dt,0.001),cnt[b'FILE'],cnt[b'INDX'],cnt[b'NTFS'],
+                    "  BAD=%d KB"%(nbad>>10) if nbad else ""))
         sys.stdout.flush()
     while True:
-        data=f.read(SCANCHUNK)
+        try:
+            data=f.read(SCANCHUNK)
+        except OSError: # olvasasi hiba (bad sector): ujraolvasas kisebb darabokban, a hibas reszek helyen nullak
+            data,bad=read_bad(f,rpos,min(SCANCHUNK,devsize-rpos),badlog)
+            f.seek(rpos+len(data))
+            for bp,bl in bad:
+                nbad+=bl
+                for g in range(bp//SCANPROGRESS,(bp+bl-1)//SCANPROGRESS+1): errs.add(g)
         eof=len(data)<SCANCHUNK
         if data!=zero[:len(data)]: # nem ures blokk: a nem ures reszet tartalmazo GB-ok legalabb "."
             for g in range(rpos//SCANPROGRESS,(rpos+len(data)-1)//SCANPROGRESS+1):
@@ -317,6 +360,8 @@ def scan_device(device):
         if eof: break
     out.close()
     f.close()
+    badlog.close()
+    if nbad: print("SCAN: %d KB olvashatatlan (nullaval potolva), a tartomanyok: %s"%(nbad>>10,SCANBAD),file=sys.stderr)
     print("SCAN: kesz.",file=sys.stderr)
 
 def read_scanfile():
@@ -349,7 +394,7 @@ for fpos,data in read_scanfile():
     def recsz(x,clu): return clu*x if x<128 else 1<<(256-x)  # pozitiv: klaszterben, negativ: 2^-x bajt
     bps=getint(11,2) ; spc=getint(13,1) ; spc=spc if spc<=128 else 1<<(256-spc)
     total=getint(40,8) ; clu=bps*spc
-    print("BOOT at 0x%X: sector=%d cluster=%d MFTrec=%d INDXrec=%d volume=%d MB MFT@LCN %d  =>  part_start=0x%X (ha elso)"%(
+    log("BOOT at 0x%X: sector=%d cluster=%d MFTrec=%d INDXrec=%d volume=%d MB MFT@LCN %d  =>  part_start=0x%X (ha elso)"%(
         fpos,bps,clu,recsz(getint(64,1),clu),recsz(getint(68,1),clu),total*bps>>20,getint(48,8),fpos),
         " / 0x%X (ha tartalek)"%(fpos-total*bps) if fpos>=total*bps else "")
 
@@ -363,36 +408,53 @@ for fpos,data in read_scanfile():
 
 #exit(0)
 
-for k in sorted(dirlist.keys()): print(k,dirlist[k])
+for k in sorted(dirlist.keys()): log(k,dirlist[k])
 
 def get_path(ref):
     if ref in dirmap: return dirmap[ref]
     oref=ref
     x=[]
+    seen=set()
     while True:
         try:
+            if ref in seen: raise KeyError # hurok a szulo-lancban (kosza rekordok miatt)
             fn,parent=dirlist[ref]
         except:
             x.append("dir__%d"%(ref))
             break
+        seen.add(ref)
         x.append(fn)
         if ref==parent: break # reached root
         ref=parent
     y="/".join(reversed(x))
-    os.makedirs(y, exist_ok=True)
+    if opt_restore: os.makedirs(y, exist_ok=True) # konyvtarakat csak --restore eseten hozunk letre
     dirmap[oref]=y
     return y
 
 for k in sorted(filedata.keys()):
     if k<1024: continue
     for fs,fn,t,fref,parent in filedata[k]:
-        print(fs,t,"%d/%d"%(fref,parent),'"%s/%s"'%(get_path(parent),fn))
+        log(fs,t,"%d/%d"%(fref,parent),'"%s/%s"'%(get_path(parent),fn))
 
 # a kis fajlok szuloihez is legyen utvonal a dirmap-ben (indxrename.py hasznalja):
 for k in filedata:
     for fs,fn,t,fref,parent in filedata[k]: get_path(parent)
 
 pickle.dump((filedata,dirmap),open("INDEX.pck","wb"))
+
+# a teljes konyvtarstruktura es a fileok listaja a stdout-ra, "find ." szeruen:
+longnames={(fref,parent) for k in filedata for fs,fn,t,fref,parent in filedata[k] if (fref,parent,fn) not in dosnames}
+paths=set(get_path(ref) for ref in dirlist if dirlist[ref][0])
+for k in filedata:
+    for fs,fn,t,fref,parent in filedata[k]:
+        if not fn or ((fref,parent,fn) in dosnames and (fref,parent) in longnames): continue # nev nelkuli, vagy a DOS nev csak alias
+        paths.add(get_path(parent)+"/"+fn)
+for p in list(paths):
+    while "/" in p:
+        p=p.rsplit("/",1)[0]
+        if p in paths: break
+        paths.add(p)
+for p in sorted(paths): print(p)
 
 # --restore / --delete-from-device nelkul az eszkozt meg sem nyitjuk, --delete-from-device nelkul csak olvasasra!
 if opt_restore or opt_delete: f=open(device,"r+b" if opt_delete else "rb")
@@ -402,7 +464,7 @@ if opt_restore:
   for mft in mftfiles:
     fnev,parent,fs,tt,runs = mftfiles[mft]
     fn=get_path(parent)+"/"+fnev
-    print("COPY %d bytes to %s  (%d runs)"%(fs,fn,len(runs)))
+    log("COPY %d bytes to %s  (%d runs)"%(fs,fn,len(runs)))
     with open(fn,"wb") as fo:
         for ro,rl in runs:
             if not ro: fo.write(bytes(BLKSIZE*rl)) ; continue # sparse run
@@ -416,7 +478,7 @@ if opt_delete:
   for mft in mftfiles:
     fnev,parent,fs,tt,runs = mftfiles[mft]
     fn=get_path(parent)+"/"+fnev
-    print("DELETE %d bytes of %s  (%d runs)"%(fs,fn,len(runs)))
+    log("DELETE %d bytes of %s  (%d runs)"%(fs,fn,len(runs)))
     for ro,rl in runs:
         if not ro: continue # sparse run: nincs mit torolni (es a boot szektort se nullazzuk!)
         f.seek(part_start+BLKSIZE*ro)
