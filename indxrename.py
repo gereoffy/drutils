@@ -99,7 +99,7 @@ TZMAX=2
 THUMB=re.compile(r"^t\d+\.")  # PhotoRec: EXIF-bol kimentett beagyazott elonezeti kep, ezt nem parositjuk --larger-rel
 DOSNAME=re.compile(r"^[^~]{1,6}~\d+(\.[^.]{0,3})?$")  # DOS 8.3 alias (ha van hosszu nev is, azt valasztjuk)
 datelist={}
-report={}  # --report: PhotoRec report.xml alapjan basename -> (start,end,gap,size,runs), lasd prtail.py
+report={}  # --report: PhotoRec report.xml alapjan basename -> (start,end,gap,size,runs), lasd fixoverlay.py
 
 def date_ok(d1,d):
     diff=d1-d ; h=int(round(diff/3600.0))
@@ -189,9 +189,9 @@ while args and args[0].startswith("--"):
     elif opt=="--tz" and args: TZMAX=int(args.pop(0))
     elif opt=="--tol" and args: DATETOL=int(args.pop(0))
     elif opt=="--report" and args:
-        import prtail
+        import fixoverlay
         rep_path=args.pop(0)
-        report=prtail.load_report(rep_path)
+        report=fixoverlay.load_report(rep_path)
     else: print(USAGE) ; sys.exit(1)
 if not args: print(USAGE) ; sys.exit(1)
 if neighbor and not rep_path: print("--neighbor needs --report report.xml") ; sys.exit(1)

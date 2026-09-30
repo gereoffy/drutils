@@ -15,9 +15,7 @@ listában szereplő eredeti nevekhez és helyekhez rendelni.
 | Fájl | Szerep |
 |---|---|
 | [lsindx.py](lsindx.py) | A teljes image-et végigszkenneli `FILE` (MFT) és `INDX` rekordokért, felépíti a könyvtárfát és a fájllistát, kérésre (`--restore`) visszamásolja az ép MFT-rekordú fájlokat, és külön kérésre (`--delete-from-device`) **kinullázza** azok klasztereit az eszközön. |
-| [fixoverlay.py](fixoverlay.py) | A PhotoRec által levágott ismert utófarkot (Samsung SEF-blokk, `0xFF` kitöltés) visszaírja a visszaállított fájlok végére, a `.overlay` fájlokból. |
-| [prtail.py](prtail.py) | A PhotoRec `report.xml` alapján megadja, hol vannak a visszaállított fájlok a lemezen, mennyi hely maradt a következő visszaállított fájlig, és kimenti a fájl utáni részt (`.overlay`). |
-| [vissza.py](vissza.py) | Az `indxrename.py` régebbi, mozgató változata által már átnevezett fájlokat visszarakja az eredeti PhotoRec-nevükre, hogy újra lehessen párosítani őket. |
+| [fixoverlay.py](fixoverlay.py) | A PhotoRec `report.xml` alapján megadja a visszaállított fájlok helyét a lemezen, kimenti a fájl utáni részt (`.overlay`), és a PhotoRec által levágott ismert utófarkot (Samsung SEF-blokk, `0xFF` kitöltés) visszaírja a fájlok végére. |
 | [dupfill.py](dupfill.py) | Az `indxrename.py` után a több helyre felmásolt képek hiányzó példányait hard linkkel pótolja. |
 | [indxrename.py](indxrename.py) | A PhotoRec által név nélkül visszaállított fájlokat az `INDEX.pck` alapján (méret, kiterjesztés, Office-metaadatból kinyert dátum) párosítja az eredeti nevekkel, és a helyükre mozgatja őket. |
 
@@ -424,7 +422,7 @@ find /mentes/photorec -type f -exec python3 ../indxrename.py {} + >> indxrename.
 > jelzi őket. Így a szkript többször is lefuttatható. Egy elrontott menet után elég a
 > célfa alkönyvtárait törölni: a forrásfájlok linkszáma visszaáll 1-re, és újra
 > párosíthatók. A PhotoRec-féle fájlok nem változnak, kivéve, ha a `fixoverlay.py` vagy a
-> `prtail.py --fix` visszaírta a végükre a levágott utófarkot.
+> `fixoverlay.py --dump … --do` visszaírta a végükre a levágott utófarkot.
 
 ### Működés
 
@@ -470,7 +468,7 @@ ideje a legközelebb van a fájlból kinyert dátumhoz.
 
 **Levágott utófarok:** ha a PhotoRec levágta a fájl végét (Samsung SEF-blokk, `0xFF` kitöltés),
 a pontos méret szerinti párosítás csak akkor működik, ha előbb a [fixoverlay.py](#fixoverlaypy)
-vagy a `prtail.py --fix` visszaírta. Egy valódi mentésben a Samsung-fotók 98%-ánál a javított
+vagy a `fixoverlay.py --dump … --do` visszaírta. Egy valódi mentésben a Samsung-fotók 98%-ánál a javított
 méret pontosan egyezett egy INDX-bejegyzéssel. A HP M540 képeknél is pontosan egyezett, de ott
 a fényképezőgép rosszul beállított órája miatt a dátum nem stimmelt. Ezeket csak az `--alldate`
 párosítja.
@@ -541,8 +539,8 @@ nevet a pontos mérete alapján.
 A szkriptet nem egyszerre érdemes az összes fájlra ráengedni, hanem sokszor egymás után.
 Mindig a legfontosabb fájltípusokkal kell kezdeni, és úgy haladni a többi felé:
 
-0. **Előtte** a levágott utófarkok visszaírása (`prtail.py --dump … --fix`, vagy a már kimentett
-   `.overlay`-ekből a `fixoverlay.py --do`), hogy a pontos méret szerinti párosítás működjön.
+0. **Előtte** a levágott utófarkok visszaírása (`fixoverlay.py --report … --dump … --do`, vagy a már
+   kimentett `.overlay`-ekből a `fixoverlay.py --do`), hogy a pontos méret szerinti párosítás működjön.
 
 1. **Alapmód** (kapcsoló nélkül), a legértékesebb típusokkal kezdve: először a nagy méretű
    Office-fájlok, aztán a fotók (JPEG), és így tovább. Például:
@@ -650,16 +648,55 @@ NAMES: [<lehetséges útvonalak>]
 ## fixoverlay.py
 
 A PhotoRec a JPEG végét az `FF D9` markernél zárja le, így levágja a fájl után fűzött adatot.
-A `fixoverlay.py` a `prtail.py --dump` által kimentett `<fájl>.overlay`-ből ezt visszaírja a
-visszaállított fájl végére. Utána a fájl bájtra azonos az eredetivel, és az `indxrename.py` a
-pontos méret szerint párosíthatja. Ehhez nem kell root, mert a lemezt nem olvassa.
+A `fixoverlay.py` ezt kezeli. A PhotoRec `report.xml`-jéből megállapítja, hol vannak a
+visszaállított fájlok a lemezen. Kimenti a fájlok utáni részt, és az ismert utófarkot
+visszaírja a fájl végére. Utána a fájl bájtra azonos az eredetivel, és az `indxrename.py` a
+pontos méret szerint párosíthatja.
 
 ```
-fixoverlay.py fájl...        kiírja, mit csinálna
-fixoverlay.py --do fájl...   visszaírja az utófarkot (a fájlidő megmarad)
+fixoverlay.py [--do] fájl...                                     a már kimentett <fájl>.overlay-ből
+fixoverlay.py --report report.xml fájl...                        a fájl helye és a kimaradt bájtok
+fixoverlay.py --report report.xml --dump <eszköz> fájl...        a fájl utáni rész kimentése: <fájl>.overlay
+fixoverlay.py --report report.xml --dump <eszköz> --do fájl...   ismert utófarok visszaírása, a többi .overlay-be
 ```
 
-A levágott rész hossza (`overlay_len`, [fixoverlay.py:19](fixoverlay.py:19)):
+`--do` nélkül semmit nem módosít, csak kiírja, mit csinálna. A `--dump`-hoz, vagyis az eszköz
+olvasásához, root kell.
+
+**A `report.xml`** (`load_report`, [fixoverlay.py:31](fixoverlay.py:31)) a PhotoRec kimeneti könyvtárában jön
+létre, és minden visszaállított fájlról tartalmazza a nevét (`f<szektor>.<kit.>`), a méretét és a
+lemezen elfoglalt helyét (`byte_run`). `--report` esetén minden megadott fájlra, a neve alapján,
+kiírja:
+
+```
+<fájl> start=<lemez eleje> end=<lemez vége> gap=<kimaradt bájtok> size=<méret> runs=<futások>
+```
+
+A `gap` a fájl vége és a következő visszaállított fájl kezdete közötti bájtok száma. A fájl
+tartományán belül kezdődő fájlokat, például a beágyazott előnézeti képeket, a keresés kihagyja.
+Nem töredezett fájlnál (`runs=1`) az eredeti fájl legfeljebb `size+gap` bájtos lehetett. Ha a
+fájl nem szerepel a `report.xml`-ben, `NOT IN REPORT` sort ír. A `load_report` függvényt az
+`indxrename.py --report` is használja, ezért a két szkriptnek ugyanabban a könyvtárban kell
+lennie.
+
+**`--dump <eszköz>`**: a fájl utáni részt a következő fájl kezdetéig, de legfeljebb 256 KB-ot
+(`TAILMAX`) kimenti a fájl mellé `<fájl>.overlay` néven. A töredezett fájlokat kihagyja.
+`--do`-val együtt az ismert utófarkot rögtön visszaírja a fájl végére. Ami nem ismert, de nem
+csupa nulla, azt `.overlay`-be menti későbbi elemzéshez, a csupa nulla részt pedig nem menti.
+A naplósor végén ilyenkor `tail=<állapot>` áll: `FIXED`, `ALREADY`, `OVERLAY` vagy `NOTAIL`.
+
+```bash
+sudo find /home3/arpi/mentes_1 -path '*_JPG*' -name 'f*.jpg' -exec python3 fixoverlay.py --report /home3/arpi/mentes_1/report.xml --dump /dev/nbd0 --do {} + > fixoverlay.log
+```
+
+**A már kimentett `.overlay`-ekből** (report nélkül, root nélkül) `--do`-val ugyanígy visszaírja
+az ismert utófarkot:
+
+```bash
+find /home3/arpi/mentes_1 -path '*_JPG*' -name 'f*.jpg' -exec python3 fixoverlay.py --do {} + > fixoverlay.log
+```
+
+**Ismert utófarkok** (`overlay_len`, [fixoverlay.py:56](fixoverlay.py:56)):
 
 - **Samsung:** a SEF-blokk (`Image_UTC_Data` – a felvétel ideje UTC-ben, ms-ban –, `MCC_Data`
   – a mobilhálózat országkódja –, … `SEFH` tartalomjegyzék … `SEFT`) a `SEFT` zárójelig tart.
@@ -668,12 +705,9 @@ A levágott rész hossza (`overlay_len`, [fixoverlay.py:19](fixoverlay.py:19)):
 - **HP, FinePix stb.:** a kép utáni `0xFF` kitöltő bájtok, legfeljebb 64. Ha utánuk `D9` jön,
   az is hozzátartozik, mert az a valódi `FF D9` lezárás.
 
-Ha a fájl vége már egyezik az utófarokkal, nem írja hozzá újra, így többször is futtatható.
-A naplóban az állapot `FIX`/`FIXED`, `ALREADY`, `NOTAIL` vagy `NOOVERLAY`, utána pedig a hossz.
-
-```bash
-find /home3/arpi/mentes_1 -path '*_JPG*' -name 'f*.jpg' -exec python3 fixoverlay.py --do {} + > fixoverlay.log
-```
+Ha a fájl vége már egyezik az utófarokkal, nem írja hozzá újra, így többször is futtatható. A
+fájlidő megmarad. Az `.overlay`-es mód állapotai: `FIX`/`FIXED`, `ALREADY`, `NOTAIL`,
+`NOOVERLAY`, utána a hossz. Az `indxrename.py` előtt kell futtatni.
 
 ## dupfill.py
 
@@ -696,83 +730,6 @@ példányt akkor pótol, ha:
 dupfill.py        kiírja, mit csinálna (LINK <meglévő> -> <hiányzó>)
 dupfill.py --do   létrehozza a hard linkeket
 ```
-
-## vissza.py
-
-Az `indxrename.py` régebbi, fájlokat mozgató változata által már átnevezett fájlokat visszarakja
-az eredeti PhotoRec-nevükre (`f<szektor>.jpg`), a PhotoRec kimeneti könyvtárában lévő `_VISSZA` alá. Ez akkor kell, ha egy
-korábbi menet rossz párosításokat végzett, és újra akarod párosítani őket. Az `indxrename.py`
-mostani, hard linkes változatánál erre már nincs szükség: elég a célfa alkönyvtárait törölni. Az elérési utak a szkript elején vannak (`MENTES`, `RECUP`).
-
-```
-vissza.py                      terv készítése a MENTES/vissza.tsv-be (semmit nem mozgat)
-vissza.py --device /dev/nbd0   ugyanez, a kétértelműeket a lemez tartalmával ellenőrizve (root)
-vissza.py --do                 a terv szerint visszamozgatja a fájlokat
-```
-
-Az eredeti nevet a `report.xml`-ből keresi:
-
-1. azonos méretű és kiterjesztésű PhotoRec-fájlok;
-2. amelyek már nincsenek a PhotoRec kimeneti könyvtárában, mert onnan mozgatta el őket az
-   `indxrename.py`;
-3. ha még mindig több van: a `jpg.csv` képmérete és EXIF-dátuma szerint;
-4. `--device` esetén: a jelölt helyén a lemezen lévő tartalom egyezik-e a fájl elejével és
-   végével.
-
-Egy név csak egyszer osztható ki. A terv státuszai:
-
-- `OK`: egyértelmű;
-- `AZONOS`: több jelölt, de a lemezen mind egyezik;
-- `TOBB`: több jelölt, `--device` nélkül;
-- `NINCS`: nincs jelölt.
-
-A `TOBB` jellemzően ugyanannak a képnek két, bájtra azonos példánya, így mindegy, melyik
-nevet kapja. A mozgatásokat a `MENTES/vissza.log` rögzíti (régi és új útvonal).
-Visszarakás után a `_VISSZA`-ra újra le kell futtatni a `prtail.py --dump`-ot, hogy
-meglegyenek az `.overlay` fájlok.
-
-## prtail.py
-
-A PhotoRec `report.xml`-jét dolgozza fel. Ez a fájl a PhotoRec kimeneti könyvtárában jön létre,
-és minden visszaállított fájlról tartalmazza a nevét (`f<szektor>.<kit.>`), a méretét és a
-lemezen elfoglalt helyét (`byte_run`).
-
-```
-prtail.py report.xml fájl...                       kiírja a fájl helyét és a kimaradt bájtokat
-prtail.py report.xml --dump <eszköz> fájl...       kimenti a fájl utáni részt: <fájl>.overlay
-```
-
-Minden megadott fájlra, a neve alapján, kiírja:
-
-```
-<fájl> start=<lemez eleje> end=<lemez vége> gap=<kimaradt bájtok> size=<méret> runs=<futások>
-```
-
-A `gap` a fájl vége és a következő visszaállított fájl kezdete közötti bájtok száma. A
-fájl tartományán belül kezdődő fájlokat, például a beágyazott előnézeti képeket, a keresés
-kihagyja. Nem töredezett fájlnál (`runs=1`) az eredeti fájl legfeljebb `size+gap` bájtos
-lehetett. Ha a fájl nem szerepel a `report.xml`-ben, `NOT IN REPORT` sort ír.
-
-`--dump <eszköz>` esetén a fájl utáni részt a következő fájl kezdetéig, de legfeljebb
-256 KB-ot (`TAILMAX`) kimenti a fájl mellé `<fájl>.overlay` néven. Ebben van például a
-Samsung-fotók levágott utófarka. A töredezett fájlokat kihagyja. Az eszköz olvasásához
-root jog kell:
-
-```bash
-sudo find /home3/arpi/mentes_1 -path '*_JPG*' -name 'f*.jpg' -exec python3 prtail.py /home3/arpi/mentes_1/report.xml --dump /dev/nbd0 {} + > prtail.log
-```
-
-`--dump <eszköz> --fix` esetén az ismert utófarkot (lásd [fixoverlay.py](#fixoverlaypy)) rögtön
-visszaírja a fájl végére. Ami nem ismert, de nem csupa nulla, azt `.overlay`-be menti későbbi
-elemzéshez, a csupa nulla részt pedig nem menti. A naplósor végén `tail=<állapot>:<bájt>` áll:
-`FIXED`, `ALREADY`, `OVERLAY` vagy `NOTAIL`.
-
-```bash
-sudo find /home3/arpi/mentes_1 -path '*_JPG*' -name 'f*.jpg' -exec python3 prtail.py /home3/arpi/mentes_1/report.xml --dump /dev/nbd0 --fix {} + > prtail.log
-```
-
-Az `indxrename.py` előtt kell futtatni. A `load_report` függvényt az `indxrename.py --report`
-is használja, ezért a két szkriptnek ugyanabban a könyvtárban kell lennie.
 
 ## Hasznos háttéranyag
 

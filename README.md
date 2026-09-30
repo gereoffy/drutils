@@ -10,7 +10,9 @@ lstree.py   - ntfs MFT file parser and fixer (recovers files from raw device usi
 
 lsindx.py   - ntfs MFT/INDX directory entries parser/lister (rebuilds file tree using only INDX entries) see LSINDX.md
 
-indxrename.py - link PhotoRec-recovered files to their original filename and dirtree-location based on size/date heuristics using INDEX.pck of lsindx.py
+fixoverlay  - fix "truncated" files using PhotoRec's report.xml (eg. extra metadata appended to jpeg files)
+
+indxrename  - link PhotoRec-recovered files to their original filename and dirtree-location based on size/date heuristics using INDEX.pck of lsindx.py
 
 testfiles.py - file content validator/verifier (detects damaged/truncated files, e.g. after data recovery), supports:
   - old msoffice documents (doc/xls/ppt and other OLE2 files)
