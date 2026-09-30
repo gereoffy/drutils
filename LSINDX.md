@@ -15,6 +15,10 @@ listában szereplő eredeti nevekhez és helyekhez rendelni.
 | Fájl | Szerep |
 |---|---|
 | [lsindx.py](lsindx.py) | A teljes image-et végigszkenneli `FILE` (MFT) és `INDX` rekordokért, felépíti a könyvtárfát és a fájllistát, kérésre (`--restore`) visszamásolja az ép MFT-rekordú fájlokat, és külön kérésre (`--delete-from-device`) **kinullázza** azok klasztereit az eszközön. |
+| [fixoverlay.py](fixoverlay.py) | A PhotoRec által levágott ismert utófarkot (Samsung SEF-blokk, `0xFF` kitöltés) visszaírja a visszaállított fájlok végére, a `.overlay` fájlokból. |
+| [prtail.py](prtail.py) | A PhotoRec `report.xml` alapján megadja, hol vannak a visszaállított fájlok a lemezen, mennyi hely maradt a következő visszaállított fájlig, és kimenti a fájl utáni részt (`.overlay`). |
+| [vissza.py](vissza.py) | Az `indxrename.py` régebbi, mozgató változata által már átnevezett fájlokat visszarakja az eredeti PhotoRec-nevükre, hogy újra lehessen párosítani őket. |
+| [dupfill.py](dupfill.py) | Az `indxrename.py` után a több helyre felmásolt képek hiányzó példányait hard linkkel pótolja. |
 | [indxrename.py](indxrename.py) | A PhotoRec által név nélkül visszaállított fájlokat az `INDEX.pck` alapján (méret, kiterjesztés, Office-metaadatból kinyert dátum) párosítja az eredeti nevekkel, és a helyükre mozgatja őket. |
 
 A tömörített fájlok és a kimentett `$MFT` alapú mentés egy külön eszköz feladata, lásd:
@@ -64,7 +68,7 @@ lásd a 8. lépést.
 
 ### Beállítás
 
-A paraméterek a szkript elején, konstansként vannak ([lsindx.py:10-26](lsindx.py:10)):
+A paraméterek a szkript elején, konstansként vannak ([lsindx.py:11-27](lsindx.py:11)):
 
 | Változó | Alapérték | Jelentés |
 |---|---|---|
@@ -104,7 +108,7 @@ A két kapcsoló együtt is megadható, de a javasolt menet az, hogy előbb csak
 futtatod, **ellenőrzöd a mentést**, és csak utána, külön futással jön a
 `--delete-from-device`. A törlés nem másol újra semmit, és a másolatokat sem ellenőrzi.
 
-**1. Szkennelés** (`scan_device`, [lsindx.py:277](lsindx.py:277)) – a lemezt **egyetlen
+**1. Szkennelés** (`scan_device`, [lsindx.py:288](lsindx.py:288)) – a lemezt **egyetlen
 menetben**, 1 MiB-os blokkokban olvassa végig. Minden blokkban megkeresi az 512 bájtra
 igazított rekordokat:
 
@@ -218,8 +222,12 @@ csak olvassa, de a lemezt így is óvni kell:
   eszközt, a PhotoRec pedig egy második alkalommal.
 - **Olvasási hiba (bad sector):** ha egy 1 MiB-os blokk olvasása I/O hibát ad, a szkennelés
   nem áll le. A ddrescue-hoz hasonlóan a blokkot előbb az elejétől előre, majd a végétől
-  visszafelé olvassa 4 KiB-os lépésekben, közvetlen `pread` hívásokkal, mindkét irányban
-  az első hibáig. A kettő közötti részt nem próbálja olvasni, hanem nullával tölti ki. Egy
+  visszafelé olvassa 4 KiB-os lépésekben, mindkét irányban az első hibáig. Linuxon ezt
+  `O_DIRECT`-tel, a page cache megkerülésével teszi. Az újabb kernelek a blokkeszközt akár
+  2 MiB-os page cache lapokban (folio) olvassák, és egy rossz szektor miatt az egész lap
+  olvashatatlan lenne. Ez egy valódi lemezen elő is fordult: egyetlen rossz szektor miatt
+  egy pontosan 2 MiB-os, igazított tartomány esett ki. Ahol nincs `O_DIRECT`, például
+  macOS-en, sima `pread`-del olvas. A kettő közötti részt nem próbálja olvasni, hanem nullával tölti ki. Egy
   hibás blokk így legfeljebb két sikertelen 4 KiB-os olvasásba kerül, akárhány rossz szektor
   van benne, a blokk két szélén lévő jó adat pedig megmarad. Egy magányos rossz szektor csak
   4 KiB-ot, vagyis pár MFT-rekordot vagy egy INDX blokkot visz el. A nullával pótolt
@@ -240,7 +248,7 @@ csak olvassa, de a lemezt így is óvni kell:
 
 A szkennelés után a feldolgozás így halad:
 
-**0. Boot szektorok** ([lsindx.py:390](lsindx.py:390)) – a `SCAN.dat`-ban talált összes NTFS
+**0. Boot szektorok** ([lsindx.py:401](lsindx.py:401)) – a `SCAN.dat`-ban talált összes NTFS
 boot szektor adatait kiírja: szektorméret, klaszterméret, MFT- és INDX-rekordméret, kötetméret,
 az MFT klaszterszáma, valamint a belőle adódó `part_start`. Ez utóbbi a boot szektor
 pozíciója, ha az első boot szektorról van szó. Ha a tartalékról, akkor a pozíció mínusz a
@@ -260,7 +268,7 @@ Ezek egy korábbi partícióhoz tartoznak (pl. Recovery vagy EFI), vagy más sze
 `SCAN.dat`, így egy korábbi partíció is feldolgozható, a `part_start` átállításával. A
 partíció végével a szkript nem foglalkozik, a lemez végéig minden rekordot feldolgoz.
 
-**1. MFT-rekordok feldolgozása** ([lsindx.py:401-403](lsindx.py:401)) – a `SCAN.dat` minden
+**1. MFT-rekordok feldolgozása** ([lsindx.py:412-414](lsindx.py:412)) – a `SCAN.dat` minden
 `FILE` rekordját feldolgozza (`parse_MFT`):
 
 - Ellenőrzi a méreteket, és elvégzi a *fixup* (update sequence) javítást: az NTFS minden
@@ -277,7 +285,7 @@ partíció végével a szkript nem foglalkozik, a lemez végéig minden rekordot
 - A fájlok a `filedata[méret]` listába, a könyvtárak a `dirlist[MFT#] = (név, szülő)`
   szótárba kerülnek.
 
-**2. INDX blokkok feldolgozása** ([lsindx.py:405-407](lsindx.py:405)) – a `SCAN.dat`
+**2. INDX blokkok feldolgozása** ([lsindx.py:416-418](lsindx.py:416)) – a `SCAN.dat`
 minden `INDX` rekordját feldolgozza (`parseindx`):
 
 - Fixup-javítás mind a 8 szektorra; hiba esetén „CRC error!” és a blokk kimarad.
@@ -299,7 +307,7 @@ minden `INDX` rekordját feldolgozza (`parseindx`):
   Ez az `offs` a `part_start` helyes értéke. Érdemes először egy próbafutással ezt
   kideríteni, beállítani, és csak utána futtatni élesben.
 
-**3. Könyvtárfa felépítése** ([lsindx.py:413-432](lsindx.py:413)) – `get_path` a szülő-láncot
+**3. Könyvtárfa felépítése** ([lsindx.py:424-443](lsindx.py:424)) – `get_path` a szülő-láncot
 a gyökérig (MFT#5, amelynek neve `.`) követi. Ha a lánc egy ismeretlen könyvtárnál megszakad
 vagy hurokba fut, annak helyén `dir__<MFT#>` áll. A könyvtárakat csak `--restore` esetén hozza
 létre (`os.makedirs`).
@@ -308,25 +316,25 @@ Egy könyvtár nevét az MFT-rekordja és a szülő INDX blokkja is megadhatja, 
 DOS 8.3 névvel is. Mindig a hosszú név nyer: az MFT-ből vagy az INDX-ből kapott DOS nevet
 egy később talált hosszú név felülírja.
 
-**4. Fájllista a naplóba** ([lsindx.py:434-437](lsindx.py:434)) – az 1024 bájtnál nagyobb
+**4. Fájllista a naplóba** ([lsindx.py:445-448](lsindx.py:445)) – az 1024 bájtnál nagyobb
 fájlokat méret szerint rendezve kiírja a hibakimenetre:
 
 ```
 <méret> <unix idő> <fájl MFT#>/<szülő MFT#> "<útvonal/név>"
 ```
 
-**5. `INDEX.pck` mentése** ([lsindx.py:439-443](lsindx.py:439)) – előtte a kis fájlok
+**5. `INDEX.pck` mentése** ([lsindx.py:450-454](lsindx.py:450)) – előtte a kis fájlok
 szülőkönyvtáraihoz is kiszámolja az útvonalat, lásd lent.
 
-**6. Könyvtár- és fájllista** ([lsindx.py:445-457](lsindx.py:445)) – a `find .`-szerű lista az
+**6. Könyvtár- és fájllista** ([lsindx.py:456-468](lsindx.py:456)) – a `find .`-szerű lista az
 stdout-ra (lásd a Futtatásnál).
 
-**7. Visszamásolás** – csak `--restore` esetén ([lsindx.py:462](lsindx.py:462)). A
+**7. Visszamásolás** – csak `--restore` esetén ([lsindx.py:473](lsindx.py:473)). A
 `SCAN.pos`-ban tárolt eszközt nyitja meg, csak olvasásra. Az `mftfiles` fájljait a
 run-listájuk alapján kimásolja a helyükre, a méretre vágja, és beállítja a módosítási időt.
 Log: `COPY <bájt> bytes to <útvonal>  (<n> runs)`.
 
-**8. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:476](lsindx.py:476)).
+**8. Nullázás** – csak `--delete-from-device` esetén ([lsindx.py:487](lsindx.py:487)).
 Az összes MFT alapján visszaállítható fájl klasztereit nullákkal felülírja az eszközön (a
 sparse futásokat kihagyja). Log: `DELETE <bájt> bytes of <útvonal>`.
 
@@ -367,8 +375,8 @@ Az `INDEX.pck`-t az [indxrename.py](#indxrenamepy) használja fel.
 ## indxrename.py
 
 A PhotoRec név nélküli kimenetét (`recup_dir.N/f1234567.doc` és hasonló fájlok)
-az `lsindx.py` által készített `INDEX.pck` alapján az eredeti nevükre nevezi át, és
-az eredeti könyvtárukba mozgatja.
+az `lsindx.py` által készített `INDEX.pck` alapján az eredeti nevükön, az eredeti
+könyvtárukban teszi elérhetővé, **hard linkként**. A PhotoRec-féle fájl a helyén marad.
 
 ### Függőség
 
@@ -379,20 +387,25 @@ pip3 install olefile
 ### Futtatás
 
 Az `lsindx.py` **kimeneti könyvtárában** kell futtatni: itt van az `INDEX.pck`, és a
-`dirmap`-ben tárolt relatív útvonalak is innen érvényesek. A célkönyvtárat átnevezés előtt
-maga hozza létre, előre létrehozott könyvtárfa nem kell.
+`dirmap`-ben tárolt relatív útvonalak is innen érvényesek. A célkönyvtárat a link
+létrehozása előtt maga hozza létre, előre létrehozott könyvtárfa nem kell.
 A párosítandó fájlokat parancssori argumentumként kapja:
 
 ```
-indxrename.py [--all] fájl...
+indxrename.py [--alldate] [--larger] [--neighbor] [--report report.xml] [--tz N] [--tol N] fájl...
 ```
 
 | Kapcsoló | Jelentés |
 |---|---|
-| *(nincs)* | **Szigorú mód:** csak akkor nevez át, ha a dátum egyezik, vagy egyetlen lehetséges név van. |
-| `--all` | **Minden mód:** mindig a legjobb (legközelebbi dátumú) jelöltre nevez át. |
+| *(nincs)* | **Legszigorúbb mód:** csak akkor, ha a méret pontosan egyezik, **és** a dátum is egyezik: ±2 másodperc, vagy pontosan 1–2 óra időzóna-eltérés ±2 másodperccel. |
+| `--alldate` | A dátumot nem vizsgálja, de a méretnek pontosan egyeznie kell. Több jelölt közül a legközelebbi dátumú nyer. |
+| `--larger` | Az eredeti **nagyobb** is lehet a visszaállított fájlnál (levágott utófarok, lásd a 4. lépést). A dátumnak ekkor is egyeznie kell. |
+| `--neighbor` | Azonos méret, de nem egyező dátum esetén a lemezszomszéd igazolja a párosítást (lásd a 3. lépést). `--report` kell hozzá. |
+| `--report report.xml` | A PhotoRec `report.xml`-je: ebből tudja a `--neighbor` a lemezen elfoglalt sorrendet, a `--larger` pedig előnyben részesíti azokat a jelölteket, amelyek beférnek a következő visszaállított fájl kezdetéig (lásd a 4. lépést). |
+| `--tz N` | Legfeljebb `N` óra időzóna-eltérést enged meg (alapból 2). |
+| `--tol N` | A dátumegyezés tűrése `N` másodperc (alapból 2). Egyes fényképezőgépek a fájlt pár másodperccel a felvétel után írják ki, ilyenkor az INDX-idő rendszeresen 6–9 másodperccel későbbi az EXIF-nél. |
 
-A kapcsolónak a fájlnevek előtt kell állnia. Kapcsoló vagy fájl nélkül, illetve ismeretlen
+A kapcsolóknak a fájlnevek előtt kell állniuk. Kapcsoló vagy fájl nélkül, illetve ismeretlen
 kapcsolóval a szkript kiírja a használatot, és kilép.
 
 ```bash
@@ -405,14 +418,17 @@ Sok fájlnál a shell argumentumlista-korlátja miatt érdemesebb `find`-dal:
 find /mentes/photorec -type f -exec python3 ../indxrename.py {} + >> indxrename.log
 ```
 
-> ⚠️ A fájlokat `os.rename`-mel **mozgatja** (nem másolja), ezért a PhotoRec kimenetének és a
-> célfának ugyanazon a fájlrendszeren kell lennie. A párosítatlan fájlok a helyükön maradnak,
-> így a szkript többször is lefuttatható, és a végén a PhotoRec könyvtárában csak a
-> fel nem ismert fájlok maradnak.
+> ⚠️ A fájlokat nem mozgatja, hanem **hard linket** készít róluk az új helyre (`os.link`). Ezért a
+> PhotoRec kimenetének és a célfának ugyanazon a fájlrendszeren kell lennie. Egy fájl csak
+> egy nevet kap: a már linkelt forrásfájlokat (`st_nlink > 1`) kihagyja, a naplóban `LINKED`
+> jelzi őket. Így a szkript többször is lefuttatható. Egy elrontott menet után elég a
+> célfa alkönyvtárait törölni: a forrásfájlok linkszáma visszaáll 1-re, és újra
+> párosíthatók. A PhotoRec-féle fájlok nem változnak, kivéve, ha a `fixoverlay.py` vagy a
+> `prtail.py --fix` visszaírta a végükre a levágott utófarkot.
 
 ### Működés
 
-**1. A fájl adatainak megállapítása** (`fileinfo`, [indxrename.py:71](indxrename.py:71)):
+**1. A fájl adatainak megállapítása** (`fileinfo`, [indxrename.py:73](indxrename.py:73)):
 
 - **méret**: a fájl mérete;
 - **kiterjesztés**: a PhotoRec által adott fájlnév kiterjesztése (a PhotoRec ezt a formátum
@@ -422,19 +438,19 @@ find /mentes/photorec -type f -exec python3 ../indxrename.py {} + >> indxrename.
   ezeknél a szkript maga olvassa ki a dátumot a dokumentum metaadataiból:
   - **ZIP-alapú** (`PK\x03\x04`: docx, xlsx, pptx) → `docProps/core.xml`, az összes `20`-szal
     kezdődő dátummező (létrehozás, módosítás, nyomtatás…) közül a **legkésőbbi**
-    (`docxdate`, [indxrename.py:15](indxrename.py:15));
+    (`docxdate`, [indxrename.py:17](indxrename.py:17));
   - **OLE2** (`D0 CF 11 E0`: doc, xls, ppt) → a SummaryInformation *utolsó mentés* ideje,
     ennek hiányában a *létrehozásé*; csak akkor használja, ha 1997 utáni
-    (`oledate`, [indxrename.py:39](indxrename.py:39)).
+    (`oledate`, [indxrename.py:41](indxrename.py:41)).
 
-**2. Jelöltek keresése** ([indxrename.py:102-130](indxrename.py:102)) – a `filedata[méret]`
+**2. Jelöltek keresése** ([indxrename.py:199-212](indxrename.py:199)) – a `filedata[méret]`
 listából, azaz csak a **bájtra pontosan azonos méretű** ismert fájlok közül. Kihagyja:
 
 - a `~`-mal kezdődő neveket (Office ideiglenes fájlok, pl. `~$level.docx`);
 - azokat, amelyeknek a célhelyén már létezik fájl. Ez lehet egy `lsindx.py` által
   visszamásolt fájl vagy egy korábbi párosítás eredménye, így egy név csak egyszer osztható ki;
 - az eltérő kiterjesztésűeket. A kiterjesztéseket mindkét oldalon kisbetűsíti és
-  normalizálja (`EXT_ALIAS`, [indxrename.py:64](indxrename.py:64)), mert a PhotoRec
+  normalizálja (`EXT_ALIAS`, [indxrename.py:66](indxrename.py:66)), mert a PhotoRec
   egy formátumot mindig ugyanúgy nevez el, az eredeti fájl viszont más írásmóddal is
   szerepelhetett:
 
@@ -452,26 +468,83 @@ listából, azaz csak a **bájtra pontosan azonos méretű** ismert fájlok köz
 A maradék jelöltek közül azt választja, amelynek az `INDEX.pck`-ban tárolt módosítási
 ideje a legközelebb van a fájlból kinyert dátumhoz.
 
-**3. Átnevezés** ([indxrename.py:133](indxrename.py:133)) – a `--all` kapcsoló dönti el,
-mennyire szigorú:
+**Levágott utófarok:** ha a PhotoRec levágta a fájl végét (Samsung SEF-blokk, `0xFF` kitöltés),
+a pontos méret szerinti párosítás csak akkor működik, ha előbb a [fixoverlay.py](#fixoverlaypy)
+vagy a `prtail.py --fix` visszaírta. Egy valódi mentésben a Samsung-fotók 98%-ánál a javított
+méret pontosan egyezett egy INDX-bejegyzéssel. A HP M540 képeknél is pontosan egyezett, de ott
+a fényképezőgép rosszul beállított órája miatt a dátum nem stimmelt. Ezeket csak az `--alldate`
+párosítja.
 
-- **`--all`** (*minden* mód): a legjobb jelöltre mindig átnevez, dátumellenőrzés nélkül. Ez
-  a több menetes használat utolsó, „maradék” menete (lásd lent).
-- **kapcsoló nélkül** (*szigorú* mód, alapértelmezés): csak akkor nevez át, ha
+**3. Párosítás** ([indxrename.py:213](indxrename.py:213)) – alapból a **legszigorúbb** módon: a fájl
+csak akkor kap nevet, ha a mérete pontosan egyezik, **és** a dátuma is egyezik a jelölt
+INDX-ben tárolt idejével (`date_ok`). Egyezőnek számít a ±2 másodpercen belüli eltérés, vagy
+a pontosan 1–2 órás eltérés ±2 másodperccel. Az utóbbit az időzóna és a nyári idő okozza,
+Office-fájloknál pedig az, hogy a `core.xml` UTC-ben tárol, de a `Z` levágása után helyi
+időként értelmeződik. Egy valódi mentésben az INDX-idők nagyobb része pontosan, a többi
+egész órányi eltéréssel egyezett. A megengedett órák száma `--tz N`-nel növelhető. Az
+egyetlen azonos méretű jelölt önmagában nem elég, mert egy levágott fájl mérete véletlenül
+egy egészen más fájléval is egyezhet.
 
-  - a dátumeltérés legfeljebb 2 óra + 61 másodperc (az időzóna-eltérés miatt: a
-    `core.xml` UTC-ben tárol, de a `Z` levágása után helyi időként értelmeződik), vagy
-  - csak egyetlen lehetséges név van.
+Ha van azonos méretű jelölt, de a dátuma nem egyezik, a fájl a helyén marad: `SKIP` sort ír,
+és utána kiírja a lehetséges neveket (`NAMES: [...]`). `--alldate` esetén a dátumot nem nézi,
+és a legközelebbi dátumú azonos méretű jelöltet választja. Erre a rosszul beállított órájú
+fényképezőgépeknél van szükség.
 
-  Ha a feltétel nem teljesül, a fájlt a helyén hagyja, `SKIP` sort ír, és utána kiírja a
-  lehetséges neveket (`NAMES: [...]`).
+**Lemezszomszéd (`--neighbor`)** (`by_neighbor`, [indxrename.py:152](indxrename.py:152)) – sok fájlnál az
+INDX-ben nem a felvétel ideje van, hanem az, amikor a képeket később a gépre másolták. Így a
+dátum órákkal, napokkal, akár évekkel is eltérhet. `--neighbor` esetén az azonos méretű, de nem
+egyező dátumú jelöltet akkor is elfogadja, ha a fájl **lemezszomszédjának** is van azonos
+méretű jelöltje **ugyanabban a könyvtárban**, más néven. Lemezszomszéd a `report.xml` szerint
+közvetlenül előtte vagy utána kezdődő PhotoRec-fájl, az előnézeti képeket átugorva. A
+szomszéd tényleges méretével számol, vagyis a `fixoverlay.py` utáni mérettel, és a PhotoRec
+kimenetében, a `report.xml` könyvtára alatt keresi meg. Ez azért működik, mert egy könyvtár
+tartalma egyben került fel a lemezre, így a fájlok egymás mellé kerültek. Egy véletlen
+méretegyezésnél a szomszéd nem esne ugyanabba a könyvtárba. Egy valódi mentésben a nem
+egyező dátumú, azonos méretű jelöltek 99%-ánál a lemezszomszéd ugyanabba a könyvtárba esett,
+és egy 400 fájlos mintából 397 így párosult. A naplóban `NEIGH(n/m)` jelzi.
+
+**4. Nagyobb eredeti (`--larger`)** – csak akkor, ha nincs azonos méretű, dátum szerint egyező
+szabad jelölt (`by_larger`, [indxrename.py:107](indxrename.py:107)). Arra az esetre való, amikor a
+visszaállított fájl kisebb az eredetinél, mert a PhotoRec levágta a végét, és a
+`fixoverlay.py` nem ismerte fel, például egy mozgóképes fotó videóját. A jelölt:
+
+- azonos (normalizált) kiterjesztésű;
+- legalább akkora, mint a visszaállított fájl;
+- a dátuma a fenti szigorú feltétel szerint egyezik. Képeknél ezt a PhotoRec az EXIF-ből
+  állítja be. Ahol nincs tartalomból vett dátum, a fájlidő a mentés ideje, és ilyen pontosan
+  semmivel sem egyezik, így ezek maguktól kimaradnak.
+
+Több jelölt közül a legkisebb méretkülönbségű nyer. Egy fájlnak csak az egyik nevét veszi
+figyelembe, lehetőleg a hosszút a DOS alias helyett. A PhotoRec által kimentett beágyazott
+előnézeti képeket (`t<szám>.jpg`) kihagyja, mert azok a teljes fotó dátumát kapják, de nem
+maguk a fotók. Egy valódi mentésben a javítatlan Samsung-fotók kb. 88%-a így is megtalálta a
+párját, pontosan 98 bájt méretkülönbséggel. A `fixoverlay.py` után azonban a pontos méret
+szerinti párosítás jobb, mert a fájl is teljes lesz.
+
+`--report report.xml` esetén felső korlátot is figyelembe vesz. A PhotoRec `report.xml`-jéből
+tudható, hol ér véget a visszaállított fájl a lemezen, és hol kezdődik a következő
+visszaállított fájl. Egy nem töredezett eredeti fájl legfeljebb ekkora lehetett (a méret
+plusz a kimaradt bájtok). A korláton belüli jelöltek elsőbbséget kapnak. Ha csak a korláton
+kívüli jelölt van, azt is elfogadja az időegyezés alapján, de a naplóban `LARGERX` jelzi.
+Ilyenkor az eredeti nagyobb volt, mint ami a következő fájlig elfér: jellemzően mozgóképes
+fotó, amelynek a videóját a PhotoRec külön fájlként állította vissza, vagy egy olyan kép,
+amelynek a PhotoRec csak az elejét találta meg. A `report.xml`-ben a fájlokat a PhotoRec által
+adott névvel (`f<szektor>.jpg`) keresi, így akkor is működik, ha a fájlokat közben más
+könyvtárba helyezted át.
+
+A `--larger`-t a pontos méret szerinti menetek **után** érdemes futtatni. Ha a PhotoRec egy
+képből egy teljes és egy csonka változatot is visszaállított, így a teljes változat kapja meg a
+nevet a pontos mérete alapján.
 
 ### Javasolt használat: több menetben, fontossági sorrendben
 
 A szkriptet nem egyszerre érdemes az összes fájlra ráengedni, hanem sokszor egymás után.
 Mindig a legfontosabb fájltípusokkal kell kezdeni, és úgy haladni a többi felé:
 
-1. **Szigorú mód** (kapcsoló nélkül), a legértékesebb típusokkal kezdve: először a nagy méretű
+0. **Előtte** a levágott utófarkok visszaírása (`prtail.py --dump … --fix`, vagy a már kimentett
+   `.overlay`-ekből a `fixoverlay.py --do`), hogy a pontos méret szerinti párosítás működjön.
+
+1. **Alapmód** (kapcsoló nélkül), a legértékesebb típusokkal kezdve: először a nagy méretű
    Office-fájlok, aztán a fotók (JPEG), és így tovább. Például:
 
    ```bash
@@ -482,44 +555,69 @@ Mindig a legfontosabb fájltípusokkal kell kezdeni, és úgy haladni a többi f
    find /mentes/photorec -type f -name '*.jpg' -exec python3 ../indxrename.py {} + >> indxrename.log
    ```
 
-2. **Minden mód (`--all`)** a legvégén, a maradékra: ami addig nem kapott nevet, az a
-   legközelebbi dátumú szabad jelöltet kapja.
+2. **Nagyobb eredeti (`--larger`)** a pontos méret szerinti menetek után:
 
    ```bash
-   find /mentes/photorec -type f -exec python3 ../indxrename.py --all {} + >> indxrename.log
+   find /mentes/photorec -type f -name '*.jpg' -exec python3 ../indxrename.py --larger --report /mentes/photorec/report.xml {} + >> indxrename.log
+   ```
+
+3. **Lemezszomszéd (`--neighbor`)** a maradékra, azonos mérettel, de a dátum helyett a
+   szomszéd könyvtára alapján:
+
+   ```bash
+   find /mentes/photorec -type f -name 'f*.jpg' -links 1 -exec python3 ../indxrename.py --neighbor --report /mentes/photorec/report.xml {} + >> indxrename.log
+   ```
+
+   A `-links 1` csak a még párosítatlan fájlokat adja át.
+
+4. **Dátum nélkül (`--alldate`)** csak célzottan, ami a `--neighbor` után is megmaradt, például egy rosszul beállított órájú
+   fényképezőgép képeire. A méretnek itt is pontosan egyeznie kell, de a véletlen
+   méretegyezés esélye nagyobb.
+
+   ```bash
+   find /mentes/photorec/_JPG_HP -type f -exec python3 ../indxrename.py --alldate {} + >> indxrename.log
    ```
 
 Ez azért működik jól, mert egy név **csak egyszer osztható ki**: ha a célhelyen már van
-fájl, azt a nevet a szkript kihagyja. A korábbi, szigorú menetekben biztosan párosított
+fájl, azt a nevet a szkript kihagyja. A korábbi, szigorúbb menetekben biztosan párosított
 fájlok így lefoglalják a nevüket, és a későbbi, lazább menetek már csak a megmaradt
 jelöltek közül választhatnak. Ez a mohó párosítás hátrányát is nagyrészt kiküszöböli.
 
 Fényképezőgépről lemásolt fotóknál az EXIF-dátum és a fájl dátuma általában azonos. Ezt
-az időt az INDX is tárolja, a PhotoRec pedig az EXIF-ből állítja be, így a fotók szigorú
-módban is jól párosíthatók.
+az időt az INDX is tárolja, a PhotoRec pedig az EXIF-ből állítja be, így a fotók alapmódban is
+jól párosíthatók.
 
 ### Kimenet
 
 ```
 <dátum> <méret> <fájl> OK(<jelöltek>/<összes>) <kit.> <eltérés mp> <új útvonal>
+<dátum> <méret> <fájl> NEIGH(<jelöltek>/<összes>) <kit.> <eltérés mp> <új útvonal>
 <dátum> <méret> <fájl> SKIP(<jelöltek>/<összes>) <kit.> <eltérés mp> <legjobb jelölt>
 NAMES: [<lehetséges útvonalak>]
+<dátum> <méret> <fájl> LARGER(<jelöltek>) <kit.> <méretkülönbség bájt> <új útvonal>
+<dátum> <méret> <fájl> LARGERX(<jelöltek>) <kit.> <méretkülönbség bájt> <új útvonal>
+<fájl> LINKED
 <dátum> <méret> <fájl> BAD(<szabad nevek>/<összes>) [<filedata bejegyzések>]
 <dátum> <méret> <fájl> UNKNOWN
 ```
 
-- `OK(n/m)`: `m` darab ismert fájl ilyen méretű, ebből `n` különböző útvonal volt szabad és
-  egyező kiterjesztésű. Az `1/1` biztos találat, a nagyobb `n` és a nagy eltérés
-  bizonytalan.
-- `SKIP(n/m)`: csak szigorú módban fordul elő. Van jelölt, de a dátum nem egyezik, és egynél
-  több lehetséges név van, ezért a fájl a helyén marad. Egy későbbi `--all` menet még
-  átnevezheti.
+- `OK(n/m)`: `m` darab ismert fájl ilyen méretű, ebből `n` szabad, egyező kiterjesztésű és
+  (`--alldate` nélkül) dátum szerint is egyező. Az `1/1` biztos találat.
+- `SKIP(n/m)`: van `n` azonos méretű szabad jelölt, de a dátuma nem egyezik, ezért a fájl a
+  helyén marad. Egy későbbi `--neighbor` vagy `--alldate` menet még párosíthatja.
+- `NEIGH(n/m)`: azonos méret, a dátum nem egyezik, de a lemezszomszéd ugyanabban a
+  könyvtárban van (`--neighbor`).
 - Ha egy mérethez több bejegyzés tartozik, előtte tabulált sorokban kiírja az összes
   kiterjesztés-egyező jelöltet a dátumeltéréssel együtt, ami utólagos kézi ellenőrzéshez
   hasznos.
 - `BAD`: van ilyen méretű ismert fájl, de egyik sem jöhet szóba (foglalt, ideiglenes vagy más
   kiterjesztésű).
-- `UNKNOWN`: nincs ilyen méretű fájl az indexben.
+- `LARGER(n)`: `--larger` esetén egy nagyobb, dátum szerint egyező eredetihez linkelve. `n` a
+  szóba jöhető fájlok száma, a szám a méretkülönbség bájtban.
+- `LARGERX(n)`: mint a `LARGER`, de `--report` szerint az eredeti nem fért volna el a következő
+  visszaállított fájl kezdetéig. Érdemes utólag ellenőrizni.
+- `LINKED`: a fájl már kapott nevet egy korábbi menetben, ezért kihagyja.
+- `UNKNOWN`: nincs ilyen méretű fájl az indexben (és `--larger` esetén nagyobb sem).
 
 ### Tudnivalók, korlátok
 
@@ -527,8 +625,11 @@ NAMES: [<lehetséges útvonalak>]
   és az első fájl kapja meg a számára legjobb nevet, akkor is, ha egy később jövőhöz még
   jobban illett volna. Ezt a fenti, több menetes használat nagyrészt kiküszöböli.
 - Méret szerinti párosítás csak ott működik, ahol a PhotoRec a formátumból a **pontos**
-  fájlméretet tudja meghatározni (pl. OLE2, ZIP). Levágott vagy kitöltött fájloknál
-  `UNKNOWN` lesz az eredmény.
+  fájlméretet tudja meghatározni (pl. OLE2, ZIP). Levágott fájloknál a `fixoverlay.py` vagy a `--larger` segíthet,
+  ha a fájlnak van tartalomból vett dátuma. Kitöltött (nagyobb) fájloknál `UNKNOWN` lesz
+  az eredmény.
+- A `--larger`-rel párosított fájlból hiányzik a levágott utófarok, ha a `fixoverlay.py` nem
+  ismerte fel, például a mozgóképes fotók videója. A kép maga ép.
 - A szkript maga csak az Office-formátumokból nyeri ki a dátumot, minden másnál a PhotoRec
   által beállított fájlidőt használja. Ha a PhotoRec egy formátumnál nem tud dátumot
   kinyerni, ott a fájlidő a mentés időpontja, így a dátum nem segít a választásban.
@@ -537,14 +638,141 @@ NAMES: [<lehetséges útvonalak>]
   módosítástól. Emiatt kell tűrés a dátum-összevetésnél.
 - Ha a jelölt szülőkönyvtára nincs a `dirmap`-ben (régebbi `lsindx.py`-val készült
   `INDEX.pck`), a fájl a `dir__<szülő MFT#>` könyvtárba kerül. A célkönyvtárat szükség
-  esetén létrehozza. Sikertelen átnevezésnél (pl. másik fájlrendszer) `RENAME ERROR` sort ír,
+  esetén létrehozza. Sikertelen link-létrehozásnál (pl. másik fájlrendszer) `LINK ERROR` sort ír,
   és folytatja a futást.
-- Az átnevezett fájl a PhotoRec által beállított mtime-ot tartja meg, az eredeti időt nem
-  állítja vissza.
+- Az új nevű fájl (hard link) a PhotoRec által beállított mtime-ot tartja meg, az eredeti időt
+  nem állítja vissza.
 - Sérült Office-fájlnál a dátum nem olvasható ki, ilyenkor a fájl mtime-ja számít.
 
 
 ---
+
+## fixoverlay.py
+
+A PhotoRec a JPEG végét az `FF D9` markernél zárja le, így levágja a fájl után fűzött adatot.
+A `fixoverlay.py` a `prtail.py --dump` által kimentett `<fájl>.overlay`-ből ezt visszaírja a
+visszaállított fájl végére. Utána a fájl bájtra azonos az eredetivel, és az `indxrename.py` a
+pontos méret szerint párosíthatja. Ehhez nem kell root, mert a lemezt nem olvassa.
+
+```
+fixoverlay.py fájl...        kiírja, mit csinálna
+fixoverlay.py --do fájl...   visszaírja az utófarkot (a fájlidő megmarad)
+```
+
+A levágott rész hossza (`overlay_len`, [fixoverlay.py:19](fixoverlay.py:19)):
+
+- **Samsung:** a SEF-blokk (`Image_UTC_Data` – a felvétel ideje UTC-ben, ms-ban –, `MCC_Data`
+  – a mobilhálózat országkódja –, … `SEFH` tartalomjegyzék … `SEFT`) a `SEFT` zárójelig tart.
+  Csak akkor fogadja el, ha a `SEFT` előtti 4 bájtos hossz szerint visszafelé egy `SEFH` fejléc
+  van.
+- **HP, FinePix stb.:** a kép utáni `0xFF` kitöltő bájtok, legfeljebb 64. Ha utánuk `D9` jön,
+  az is hozzátartozik, mert az a valódi `FF D9` lezárás.
+
+Ha a fájl vége már egyezik az utófarokkal, nem írja hozzá újra, így többször is futtatható.
+A naplóban az állapot `FIX`/`FIXED`, `ALREADY`, `NOTAIL` vagy `NOOVERLAY`, utána pedig a hossz.
+
+```bash
+find /home3/arpi/mentes_1 -path '*_JPG*' -name 'f*.jpg' -exec python3 fixoverlay.py --do {} + > fixoverlay.log
+```
+
+## dupfill.py
+
+Előfordul, hogy ugyanaz a kép több könyvtárba is fel volt másolva: azonos névvel, mérettel és
+dátummal. A PhotoRec minden, a lemezen még meglévő példányt külön visszaállít. Ha azonban
+valamelyik példány elveszett, például a törölt részre esett, akkor az egyik könyvtárban
+megvan a kép, a másikban nincs.
+
+A `dupfill.py` az `indxrename.py` összes menete után, az `INDEX.pck` könyvtárából futtatva
+ezeket pótolja. Ha az INDX szerint egy kép több helyen szerepelt, és az egyik helyen már
+megvan, a többi helyre **hard linket** készít róla, így az nem foglal helyet. Egy hiányzó
+példányt akkor pótol, ha:
+
+- a név (kis- és nagybetűtől függetlenül) és a méret egyezik;
+- a dátum egész órányi eltéréssel ±2 másodpercen belül egyezik;
+- a kiterjesztés kép (`IMGEXT`: jpg, png, gif, tif, heic, nef, cr2 stb.). A `thumbs.db`
+  és a hasonló fájlok kimaradnak, mert azoknál az azonos méret nem jelent azonos tartalmat.
+
+```
+dupfill.py        kiírja, mit csinálna (LINK <meglévő> -> <hiányzó>)
+dupfill.py --do   létrehozza a hard linkeket
+```
+
+## vissza.py
+
+Az `indxrename.py` régebbi, fájlokat mozgató változata által már átnevezett fájlokat visszarakja
+az eredeti PhotoRec-nevükre (`f<szektor>.jpg`), a PhotoRec kimeneti könyvtárában lévő `_VISSZA` alá. Ez akkor kell, ha egy
+korábbi menet rossz párosításokat végzett, és újra akarod párosítani őket. Az `indxrename.py`
+mostani, hard linkes változatánál erre már nincs szükség: elég a célfa alkönyvtárait törölni. Az elérési utak a szkript elején vannak (`MENTES`, `RECUP`).
+
+```
+vissza.py                      terv készítése a MENTES/vissza.tsv-be (semmit nem mozgat)
+vissza.py --device /dev/nbd0   ugyanez, a kétértelműeket a lemez tartalmával ellenőrizve (root)
+vissza.py --do                 a terv szerint visszamozgatja a fájlokat
+```
+
+Az eredeti nevet a `report.xml`-ből keresi:
+
+1. azonos méretű és kiterjesztésű PhotoRec-fájlok;
+2. amelyek már nincsenek a PhotoRec kimeneti könyvtárában, mert onnan mozgatta el őket az
+   `indxrename.py`;
+3. ha még mindig több van: a `jpg.csv` képmérete és EXIF-dátuma szerint;
+4. `--device` esetén: a jelölt helyén a lemezen lévő tartalom egyezik-e a fájl elejével és
+   végével.
+
+Egy név csak egyszer osztható ki. A terv státuszai:
+
+- `OK`: egyértelmű;
+- `AZONOS`: több jelölt, de a lemezen mind egyezik;
+- `TOBB`: több jelölt, `--device` nélkül;
+- `NINCS`: nincs jelölt.
+
+A `TOBB` jellemzően ugyanannak a képnek két, bájtra azonos példánya, így mindegy, melyik
+nevet kapja. A mozgatásokat a `MENTES/vissza.log` rögzíti (régi és új útvonal).
+Visszarakás után a `_VISSZA`-ra újra le kell futtatni a `prtail.py --dump`-ot, hogy
+meglegyenek az `.overlay` fájlok.
+
+## prtail.py
+
+A PhotoRec `report.xml`-jét dolgozza fel. Ez a fájl a PhotoRec kimeneti könyvtárában jön létre,
+és minden visszaállított fájlról tartalmazza a nevét (`f<szektor>.<kit.>`), a méretét és a
+lemezen elfoglalt helyét (`byte_run`).
+
+```
+prtail.py report.xml fájl...                       kiírja a fájl helyét és a kimaradt bájtokat
+prtail.py report.xml --dump <eszköz> fájl...       kimenti a fájl utáni részt: <fájl>.overlay
+```
+
+Minden megadott fájlra, a neve alapján, kiírja:
+
+```
+<fájl> start=<lemez eleje> end=<lemez vége> gap=<kimaradt bájtok> size=<méret> runs=<futások>
+```
+
+A `gap` a fájl vége és a következő visszaállított fájl kezdete közötti bájtok száma. A
+fájl tartományán belül kezdődő fájlokat, például a beágyazott előnézeti képeket, a keresés
+kihagyja. Nem töredezett fájlnál (`runs=1`) az eredeti fájl legfeljebb `size+gap` bájtos
+lehetett. Ha a fájl nem szerepel a `report.xml`-ben, `NOT IN REPORT` sort ír.
+
+`--dump <eszköz>` esetén a fájl utáni részt a következő fájl kezdetéig, de legfeljebb
+256 KB-ot (`TAILMAX`) kimenti a fájl mellé `<fájl>.overlay` néven. Ebben van például a
+Samsung-fotók levágott utófarka. A töredezett fájlokat kihagyja. Az eszköz olvasásához
+root jog kell:
+
+```bash
+sudo find /home3/arpi/mentes_1 -path '*_JPG*' -name 'f*.jpg' -exec python3 prtail.py /home3/arpi/mentes_1/report.xml --dump /dev/nbd0 {} + > prtail.log
+```
+
+`--dump <eszköz> --fix` esetén az ismert utófarkot (lásd [fixoverlay.py](#fixoverlaypy)) rögtön
+visszaírja a fájl végére. Ami nem ismert, de nem csupa nulla, azt `.overlay`-be menti későbbi
+elemzéshez, a csupa nulla részt pedig nem menti. A naplósor végén `tail=<állapot>:<bájt>` áll:
+`FIXED`, `ALREADY`, `OVERLAY` vagy `NOTAIL`.
+
+```bash
+sudo find /home3/arpi/mentes_1 -path '*_JPG*' -name 'f*.jpg' -exec python3 prtail.py /home3/arpi/mentes_1/report.xml --dump /dev/nbd0 --fix {} + > prtail.log
+```
+
+Az `indxrename.py` előtt kell futtatni. A `load_report` függvényt az `indxrename.py --report`
+is használja, ezért a két szkriptnek ugyanabban a könyvtárban kell lennie.
 
 ## Hasznos háttéranyag
 

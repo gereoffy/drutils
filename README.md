@@ -6,9 +6,11 @@ indx3.c     - raw disk data scanner, tries to detect file types, partitions and 
 
 olefix.c    - OLE file (doc/xls/etc) analyzer & fixer
 
-lstree.py   - ntfs MFT file parser and fixer
+lstree.py   - ntfs MFT file parser and fixer (recovers files from raw device using oob MFT table) see LSTREE.md
 
-lsindx.py   - ntfs INDX directory entries parser/lister
+lsindx.py   - ntfs MFT/INDX directory entries parser/lister (rebuilds file tree using only INDX entries) see LSINDX.md
+
+indxrename.py - link PhotoRec-recovered files to their original filename and dirtree-location based on size/date heuristics using INDEX.pck of lsindx.py
 
 testfiles.py - file content validator/verifier (detects damaged/truncated files, e.g. after data recovery), supports:
   - old msoffice documents (doc/xls/ppt and other OLE2 files)
@@ -36,13 +38,18 @@ testtif.py  - tif  parser & validator
 testpsd.py  - psd/psb parser & validator  
 testwmf.py  - wmf/emf parser & validator  
 testzip.py  - zip-based formats (office, odf, epub, spv...) validator  
-testole.py  - OLE2 (doc/xls/ppt...) validator  
+testole.py  - OLE2 (doc/xls/ppt...) validator, built on parseole  
+parseole.py - standalone OLE2 reader (olefile replacement, strict & lenient mode, metadata), no dependencies  
 testsav.py  - SPSS sav/zsav parser & validator  
 testdxf.py  - dxf (ASCII & binary) parser & validator  
 testdwg.py  - dwg integrity checker (CRC/checksums/Reed-Solomon)  
 testmp4.py  - mp4/mov/heic (ISOBMFF) structure & sample table validator  
 fileinfo.py - common code of the per-file metadata lines (XXX_INFO: dates, author, program, device)  
 testpdf.py  - pdf  parser & validator  
+
+Usage (directories are checked recursively, -j N: N parallel worker processes, output is identical to a sequential run):
+
+    pypy testfiles.py -j 32 /mnt/recovered/
 
 All modules are used by testfiles.py, but can be run standalone (in debug mode) on a file or a directory, e.g.:
 
