@@ -1,17 +1,15 @@
 #! /usr/bin/python3
 
-# OLE2 (Compound File) alapu fileok: doc, xls, ppt, Thumbs.db, msg, ...
-# kulso konyvtar nelkul (korabban olefile kellett hozza)
+# OLE2 (Compound File) alapu fileok ellenorzese: doc, xls, ppt, Thumbs.db, msg, ...
+# Az OLE olvaso (a streamek es a metaadatok kiolvasasa) a parseole.py-ban van, itt az ervenyesseg ellenorzese.
 
-import datetime
-import io
 import re
 from struct import unpack, unpack_from
 
-try:
-    from fileinfo import set_file_time   # fix_filedatetime (a testole.py onmagaban is hasznalhato, akkor nincs)
-except ImportError:
-    def set_file_time(fname, created, modified): pass
+from parseole import OleFile, check_fat, check_propset, ole_info, thumbs_catalog
+from fileinfo import set_file_time
+from testjpeg import testjpeg
+from testpng import testpng
 
 
 def P23Decode(value):
@@ -33,307 +31,12 @@ def ShortXLUnicodeString(data, isBIFF8):
 
 
 ###############################################################################################################################
-# OLE2 (Compound File Binary, MS-CFB) olvaso, kulso konyvtar nelkul. Az olefile ellenorzeseit koveti: a hibak kivetelt
-# dobnak (strict), az iroi furcsasagok (pl. szemet a stream meret felso 32 bitjeben) csak az issues listaba kerulnek.
-# strict=False: megengedo parser (pl. virusellenorzeshez): semmi nem dob kivetelt (csak a nem OLE file), minden hiba az
-# issues listaba kerul, es amit lehet, kiolvas a serult fileokbol is. A hibas meretek / ciklikus lancok ellen vedett
-# (a beolvasott adat merete a file meretevel aranyos).
-###############################################################################################################################
-
-OLE_MAGIC = b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'
-ENDOFCHAIN, FREESECT, FATSECT, DIFSECT, NOSTREAM = 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFD, 0xFFFFFFFC, 0xFFFFFFFF
-UNSURE, POTENTIAL, INCORRECT, FATAL = 10, 20, 30, 40      # hiba szintek (mint az olefile-ban)
-
-
-class OleFileError(IOError):
-    pass
-
-class NotOleFileError(OleFileError):
-    pass
-
-
-class OleEntry:
-    """ konyvtar bejegyzes """
-    __slots__ = ('sid', 'name', 'type', 'left', 'right', 'child', 'clsid', 'createTime', 'modifyTime', 'isectStart',
-                 'size', 'is_minifat', 'kids', 'kids_dict', 'used')
-
-
-class OleFile:
-    """
-    ole = OleFile(data): fejlec, FAT (DIFAT-tal), konyvtar fa. Felulet: listdir(), exists(path), openstream(path).read(),
-    entry(path), root, fat, minifat, issues. A path '/'-rel elvalasztott szoveg vagy lista, kis/nagybetu fuggetlen.
-    """
-
-    def __init__(self, d, strict=True):
-        self.d = d
-        self.strict = strict
-        self.read_budget = 8 * len(d) + (16 << 20)   # megengedo modban osszesen ennyi byte olvashato a lancokbol (DoS vedelem)
-        self.raise_level = INCORRECT if strict else FATAL + 1
-        self.issues = []            # a nem hibanak szamito furcsasagok
-        self.minifat = None
-        self.ministream = None
-        self.used_fat, self.used_minifat = set(), set()
-        if len(d) < 512 or d[:8] != OLE_MAGIC:
-            raise NotOleFileError("not an OLE2 structured storage file")
-        (clsid, minor, self.dll_version, byte_order, sector_shift, mini_shift, res1, res2, ndir, self.num_fat_sectors,
-         self.first_dir_sector, trans, cutoff, self.first_mini_fat_sector, self.num_mini_fat_sectors,
-         self.first_difat_sector, self.num_difat_sectors) = unpack_from('<16sHHHHHHLLLLLLLLLL', d, 8)
-        if clsid != bytes(16): self.defect(INCORRECT, "incorrect CLSID in OLE header")
-        if self.dll_version not in (3, 4): self.defect(INCORRECT, "incorrect DllVersion in OLE header")
-        if byte_order != 0xFFFE: self.defect(INCORRECT, "incorrect ByteOrder in OLE header")
-        ss = self.sectorsize = 1 << min(sector_shift, 16)
-        if ss not in (512, 4096): self.defect(INCORRECT, "incorrect sector_size in OLE header")
-        if (self.dll_version == 3 and ss != 512) or (self.dll_version == 4 and ss != 4096):
-            self.defect(INCORRECT, "sector_size does not match DllVersion in OLE header")
-        self.minisectorsize = 1 << min(mini_shift, 16)
-        if self.minisectorsize != 64: self.defect(INCORRECT, "incorrect mini_sector_size in OLE header")
-        if res1 or res2: self.defect(INCORRECT, "incorrect OLE header (non-null reserved bytes)")
-        if ss == 512 and ndir: self.defect(INCORRECT, "incorrect number of directory sectors in OLE header")
-        if trans: self.defect(POTENTIAL, "incorrect OLE header (transaction_signature_number>0)")
-        if cutoff != 0x1000: self.defect(INCORRECT, "incorrect mini_stream_cutoff_size in OLE header")
-        self.minisectorcutoff = 0x1000
-        self.nb_sect = (len(d) + ss - 1) // ss - 1       # a fileban levo szektorok szama (a fejlec nelkul)
-        self.check_duplicate(self.first_dir_sector)
-        if self.num_mini_fat_sectors: self.check_duplicate(self.first_mini_fat_sector)
-        if self.num_difat_sectors: self.check_duplicate(self.first_difat_sector)
-        self.load_fat()
-        self.load_directory()
-
-    def defect(self, level, msg):
-        if level >= self.raise_level: raise OleFileError(msg)
-        self.issues.append(msg)
-
-    def check_duplicate(self, first, mini=False):
-        """ ket stream nem kezdodhet ugyanazon a szektoron """
-        if not mini and first in (DIFSECT, FATSECT, ENDOFCHAIN, FREESECT): return
-        used = self.used_minifat if mini else self.used_fat
-        if first in used: self.defect(INCORRECT, "Stream referenced twice")
-        used.add(first)
-
-    def getsect(self, s):
-        """ egy teljes szektor (FAT/DIFAT olvasashoz), csonka szektor: FATAL """
-        o = (s + 1) * self.sectorsize
-        b = self.d[o:o + self.sectorsize]
-        if len(b) != self.sectorsize:
-            self.defect(FATAL, "incomplete OLE sector")
-            return None
-        return b
-
-    def sect2list(self, b):
-        return list(unpack_from('<%dL' % (len(b) // 4), b))
-
-    def load_fat_sect(self, idx):
-        for s in idx:
-            if s in (ENDOFCHAIN, FREESECT): break
-            if not self.strict and len(self.fat) >= self.nb_sect: break   # a tobbi ugyis levagodik (DoS vedelem)
-            b = self.getsect(s)
-            if b is None: break
-            self.fat += self.sect2list(b)
-
-    def load_fat(self):
-        self.fat = []
-        self.load_fat_sect(self.sect2list(self.d[76:512]))
-        if self.num_difat_sectors:
-            if self.num_fat_sectors <= 109: self.defect(INCORRECT, "incorrect DIFAT, not enough sectors")
-            if self.first_difat_sector >= self.nb_sect: self.defect(FATAL, "incorrect DIFAT, first index out of range")
-            per = self.sectorsize // 4 - 1
-            nb = (self.num_fat_sectors - 109 + per - 1) // per
-            if self.num_difat_sectors != nb: self.defect(INCORRECT, "incorrect DIFAT")
-            s = self.first_difat_sector
-            if not self.strict: nb = min(nb, self.num_difat_sectors, self.nb_sect)   # hibas/oriasi szamok (DoS vedelem)
-            for i in range(nb):
-                b = self.getsect(s)
-                if b is None: break
-                v = self.sect2list(b)
-                self.load_fat_sect(v[:per])
-                s = v[per]
-            if s not in (ENDOFCHAIN, FREESECT): self.defect(INCORRECT, "incorrect end of DIFAT")
-        del self.fat[self.nb_sect:]
-
-    def read_chain(self, data, offset, ss, fat, sect, size=None):
-        """
-        egy stream beolvasasa a lancbol (az olefile OleStream ellenorzeseivel). size=None: ismeretlen meret (konyvtar),
-        ENDOFCHAIN-ig. data: a file (offset=szektor meret) vagy a ministream (offset=0)
-        """
-        unknown = size is None
-        if unknown: size = len(fat) * ss
-        nb = (size + ss - 1) // ss
-        if nb > len(fat): self.defect(INCORRECT, "malformed OLE document, stream too large")
-        if size == 0 and sect != ENDOFCHAIN: self.defect(INCORRECT, "incorrect OLE sector index for empty stream")
-        seen = None
-        if not self.strict:
-            nb = min(nb, len(fat))   # ciklus nelkul a lanc nem lehet hosszabb a FAT-nal
-            seen = set()
-        out = []
-        for i in range(nb):
-            if sect == ENDOFCHAIN:
-                if unknown: break
-                self.defect(INCORRECT, "incomplete OLE stream")
-                break
-            if sect >= len(fat):
-                self.defect(INCORRECT, "incorrect OLE FAT, sector index out of range")
-                break
-            if seen is not None:
-                if sect in seen:
-                    self.defect(INCORRECT, "loop in OLE sector chain")
-                    break
-                seen.add(sect)
-                self.read_budget -= ss
-                if self.read_budget < 0:
-                    self.defect(INCORRECT, "OLE read limit exceeded (overlapping streams?)")
-                    break
-            o = offset + ss * sect
-            b = data[o:o + ss]
-            if len(b) != ss and sect != len(fat) - 1: self.defect(INCORRECT, "incomplete OLE sector")
-            out.append(b)
-            sect = fat[sect]
-        b = b''.join(out)
-        if len(b) >= size: return b[:size]
-        if not unknown: self.defect(INCORRECT, "OLE stream size is less than declared")
-        return b
-
-    def load_directory(self):
-        dd = self.read_chain(self.d, self.sectorsize, self.sectorsize, self.fat, self.first_dir_sector)
-        self.dirdata = dd
-        self.direntries = [None] * (len(dd) // 128)
-        if not self.direntries:
-            self.defect(FATAL, "OLE directory index out of range")
-            self.root = None
-            return
-        self.root = self.load_entry(0)
-        self.build_tree(self.root)
-
-    def load_entry(self, sid):
-        if sid >= len(self.direntries):
-            self.defect(FATAL, "OLE directory index out of range")
-            return None
-        if self.direntries[sid] is not None:
-            self.defect(INCORRECT, "double reference for OLE stream/storage")
-            return self.direntries[sid]
-        e = self.dirdata[sid * 128:(sid + 1) * 128]
-        en = OleEntry()
-        en.sid = sid
-        nl, en.type, color, en.left, en.right, en.child = unpack_from('<HBBLLL', e, 64)
-        clsid = e[80:96]
-        en.createTime, en.modifyTime, en.isectStart, low, high = unpack_from('<QQLLL', e, 100)
-        if en.type not in (0, 1, 2, 5): self.defect(INCORRECT, "unhandled OLE storage type")
-        if en.type == 5 and sid != 0: self.defect(INCORRECT, "duplicate OLE root entry")
-        if sid == 0 and en.type != 5: self.defect(INCORRECT, "incorrect OLE root entry")
-        if nl > 64:
-            self.defect(INCORRECT, "incorrect DirEntry name length >64 bytes")
-            nl = 64
-        en.name = e[:max(nl - 2, 0)].decode('utf-16le', 'replace')
-        if self.sectorsize == 512:
-            # a regi irok a felso 32 bitbe szemetet (0xFFFFFFFF, 1...) irhatnak
-            if high not in (0, 0xFFFFFFFF): self.defect(UNSURE, "incorrect OLE stream size")
-            en.size = low
-        else:
-            en.size = low + (high << 32)
-        en.clsid = "" if clsid == bytes(16) else "%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X" % unpack_from('<LHH8B', clsid)
-        if en.type == 1 and en.size: self.defect(POTENTIAL, "OLE storage with size>0")
-        en.is_minifat = en.type == 2 and 0 < en.size < self.minisectorcutoff
-        if en.type in (2, 5) and en.size: self.check_duplicate(en.isectStart, en.is_minifat)
-        en.kids, en.kids_dict, en.used = [], {}, False
-        self.direntries[sid] = en
-        return en
-
-    def build_tree(self, node):
-        """ a piros-fekete fa bejarasa (bal, sajat, jobb, gyerekek), a gyerekek nev szerint rendezve """
-        if node is None or node.child == NOSTREAM: return
-        todo = [(node, node.child)]
-        while todo:
-            parent, sid = todo.pop()
-            if sid == NOSTREAM: continue
-            if sid >= len(self.direntries):
-                self.defect(INCORRECT, "OLE DirEntry index out of range")
-                continue
-            child = self.load_entry(sid)
-            if child is None: continue
-            if child.used:
-                self.defect(INCORRECT, "OLE Entry referenced more than once")
-                continue
-            child.used = True
-            low = child.name.lower()
-            if low in parent.kids_dict: self.defect(INCORRECT, "Duplicate filename in OLE storage")
-            if child.type not in (1, 2): self.defect(INCORRECT, "The directory tree contains an entry which is not a stream nor a storage.")
-            parent.kids.append(child)
-            parent.kids_dict[low] = child
-            todo += [(parent, child.left), (parent, child.right)]
-            # a stream gyerek mutatoja is NOSTREAM kell legyen: ha nem, azt is bejarjuk (mint az olefile), igy a serules kiderul
-            if child.child != NOSTREAM: todo.append((child, child.child))
-        for e in self.direntries:
-            if e is not None: e.kids.sort(key=lambda k: k.name)
-
-    def listdir(self, streams=True, storages=False):
-        out = []
-        def walk(node, prefix):
-            for k in node.kids:
-                if k.type == 1:
-                    if storages: out.append(prefix + [k.name])
-                    walk(k, prefix + [k.name])
-                elif k.type == 2 and streams:
-                    out.append(prefix + [k.name])
-        if self.root is not None: walk(self.root, [])
-        return out
-
-    def entry(self, path):
-        node = self.root
-        for n in (path.split('/') if isinstance(path, str) else path):
-            node = node.kids_dict.get(n.lower()) if node is not None else None
-        return node
-
-    def exists(self, path):
-        return self.entry(path) is not None
-
-    def load_minifat(self):
-        stream_size = self.num_mini_fat_sectors * self.sectorsize
-        nb = (self.root.size + self.minisectorsize - 1) // self.minisectorsize
-        if nb * 4 > stream_size: self.defect(INCORRECT, "OLE MiniStream is larger than MiniFAT")
-        b = self.read_chain(self.d, self.sectorsize, self.sectorsize, self.fat, self.first_mini_fat_sector, stream_size)
-        self.minifat = self.sect2list(b[:len(b) // 4 * 4])[:nb]
-        self.ministream = self.read_chain(self.d, self.sectorsize, self.sectorsize, self.fat, self.root.isectStart, self.root.size)
-
-    def openstream(self, path):
-        e = self.entry(path)
-        if e is None: raise IOError("file not found")
-        if e.type != 2: raise IOError("this file is not a stream")
-        if e.size < self.minisectorcutoff:
-            if self.ministream is None: self.load_minifat()
-            data = self.read_chain(self.ministream, 0, self.minisectorsize, self.minifat, e.isectStart, e.size)
-        else:
-            data = self.read_chain(self.d, self.sectorsize, self.sectorsize, self.fat, e.isectStart, e.size)
-        return io.BytesIO(data)
-
-
-###############################################################################################################################
 # beagyazott kepek (OfficeArt BLIP rekordok: doc Data stream, ppt Pictures stream, xls MSODRAWINGGROUP):
 # a JPEG/PNG kepeket a testjpeg/testpng-vel ellenorizzuk
 ###############################################################################################################################
 
 # recType -> (formatum, recInstance-ek 1 UID-dal, recInstance-ek 2 UID-dal)
 blip_types = {0xF01D: ("jpg", (0x46A, 0x6E2), (0x46B, 0x6E3)), 0xF02A: ("jpg", (0x46A, 0x6E2), (0x46B, 0x6E3)), 0xF01E: ("png", (0x6E0,), (0x6E1,))}
-
-
-_image_checkers = {}
-
-def image_checker(fmt, log):
-    """
-    kep ellenorzo fuggveny (kep -> hibapont), vagy None. A testjpeg/testpng csak akkor kell, ha van kep; ha nincs meg a
-    modul (pl. a testole.py-t onmagaban hasznaljak), a kep ellenorzes kimarad (figyelmeztetessel).
-    """
-    if fmt not in _image_checkers:
-        try:
-            if fmt == "jpg":
-                from testjpeg import testjpeg
-                _image_checkers[fmt] = lambda img: testjpeg(img, embedded=True)
-            else:
-                from testpng import testpng
-                _image_checkers[fmt] = testpng
-        except ImportError as e:
-            _image_checkers[fmt] = None
-            _image_checkers[fmt + "_err"] = str(e)
-    if _image_checkers[fmt] is None: log("WARNING: embedded %s images not checked: %s" % (fmt, _image_checkers[fmt + "_err"]))
-    return _image_checkers[fmt]
 
 
 ###############################################################################################################################
@@ -359,26 +62,12 @@ STD_DHT = b'\xff\xc4' + (len(_STD_DHT_BODY) + 2).to_bytes(2, 'big') + _STD_DHT_B
 
 def check_thumbs(ole, log):
     """
-    Thumbs.db: a Catalog bejegyzesei (hossz, sorszam, FILETIME, UTF-16 nev), minden bejegyzeshez van belyegkep stream,
-    a stream fejlece (fejlec hossz, tipus, meret) es a JPEG dekodolhato.
-    visszaad: (hibauzenet vagy None, [(sorszam, eredeti nev, datum, OK|BAD|MISSING|-)])
+    Thumbs.db: a Catalog bejegyzesei hianytalanok, minden bejegyzeshez van belyegkep stream, a stream fejlece (fejlec
+    hossz, tipus, meret) stimmel es a JPEG dekodolhato.
+    visszaad: (hibauzenet vagy None, [(sorszam, eredeti nev, datum, OK|BAD|MISSING)])
     """
-    c = ole.openstream('Catalog').read()
-    if len(c) < 16: return "Catalog stream too short", []
-    hl, ver, cnt, w, h = unpack_from('<HHLLL', c, 0)
-    log("DB: Thumbs.db catalog version %d, %d entries, thumbnails %dx%d" % (ver, cnt, w, h))
-    p = hl
-    entries = []
-    err = None
-    while p + 16 <= len(c) and len(entries) < cnt:
-        l, idx, ft = unpack_from('<LLQ', c, p)
-        if l < 16 or p + l > len(c):
-            err = "bad catalog entry #%d at %d (length %d)" % (len(entries) + 1, p, l)
-            break
-        entries.append((idx, c[p + 16:p + l].decode('utf-16le', 'replace').split('\x00')[0], _filetime(ft)))
-        p += l
-    if not err and len(entries) != cnt: err = "catalog has %d of %d entries (truncated?)" % (len(entries), cnt)
-    check = image_checker("jpg", log)
+    err, hdr, entries = thumbs_catalog(ole)
+    if hdr: log("DB: Thumbs.db catalog version %d, %d entries, thumbnails %dx%d" % hdr)
     streams = {s[0] for s in ole.listdir() if len(s) == 1}
     out = []
     bad = missing = 0
@@ -400,8 +89,8 @@ def check_thumbs(ole, log):
             elif img[:3] != b'\xff\xd8\xff' and len(img) >= 16:   # regi tipus: meg 16 byte fejlec, JPEG Huffman tablak nelkul
                 img = img[16:]
                 if b'\xff\xc4' not in img[:512]: img = img[:2] + STD_DHT + img[2:]
-            if not e and check: e = check(img)
-        state = "BAD" if e else "OK" if check else "-"
+            if not e: e = testjpeg(img, embedded=True)
+        state = "BAD" if e else "OK"
         if e:
             bad += 1
             if first is None: first = "thumbnail #%d (%s) bad" % (idx, name)
@@ -417,7 +106,6 @@ def check_blips(d, log):
     """ visszaad: (kepek szama, hibas kepek szama, elso hiba leirasa) """
     cnt = bad = 0
     first = None
-    checker = lambda fmt: image_checker(fmt, log)
     for rt, (fmt, inst1, inst2) in blip_types.items():
         pat = bytes([rt & 0xFF, rt >> 8])
         i = d.find(pat, 2)
@@ -430,145 +118,14 @@ def check_blips(d, log):
                 end = p + 8 + l
                 img = d[start:end]
                 if img[:3] == b'\xff\xd8\xff' or img[:8] == b'\x89PNG\r\n\x1a\n':
-                    c = checker(fmt)
-                    if end > len(d) or c is not None:
-                        cnt += 1
-                        e = 10 if end > len(d) else c(img)
-                        log("OLE: embedded %s image at %d, %d bytes%s" % (fmt, start, len(img), " BAD" if e else ""))
-                        if e:
-                            bad += 1
-                            if first is None: first = "%s image at %d (%d bytes)" % (fmt, start, l)
+                    cnt += 1
+                    e = 10 if end > len(d) else testjpeg(img, embedded=True) if fmt == "jpg" else testpng(img)
+                    log("OLE: embedded %s image at %d, %d bytes%s" % (fmt, start, len(img), " BAD" if e else ""))
+                    if e:
+                        bad += 1
+                        if first is None: first = "%s image at %d (%d bytes)" % (fmt, start, l)
             i = d.find(pat, i + 1)
     return cnt, bad, first
-
-
-###############################################################################################################################
-# FAT konzisztencia: minden lanc pontosan akkora, mint a stream, ENDOFCHAIN-nel zarul, es egy szektor csak egy lanchoz tartozik
-# (az olefile csak azt nezi, hogy ket stream ne ugyanazon a szektoron kezdodjon, es a tul hosszu lancot eltuti)
-###############################################################################################################################
-
-def check_fat(ole):
-    """ visszaad: hibauzenet vagy None. A streameket elotte vegig kell olvasni (a minifat-ot csak akkor tolti be). """
-    owners = {"big": {}, "mini": {}}
-
-    def walk(domain, fat, start, count, name):
-        """ count: az elvart lanchossz (None: ismeretlen, pl. konyvtar) """
-        own = owners[domain]
-        s = start
-        n = 0
-        while s != ENDOFCHAIN:
-            if s >= len(fat): return "%s: sector index %d out of range" % (name, s)
-            if s in own: return "%s: sector %d also used by %s" % (name, s, own[s])
-            own[s] = name
-            n += 1
-            if count is not None and n > count: return "%s: chain longer than stream size (%d sectors expected)" % (name, count)
-            s = fat[s]
-            if s >= 0xFFFFFFFA and s != ENDOFCHAIN: return "%s: chain ends with 0x%X instead of ENDOFCHAIN" % (name, s)
-        if count is not None and n != count: return "%s: chain has %d of %d sectors" % (name, n, count)
-        return None
-
-    ss = ole.sectorsize
-    err = walk("big", ole.fat, ole.first_dir_sector, None, "directory")
-    if not err and ole.num_mini_fat_sectors: err = walk("big", ole.fat, ole.first_mini_fat_sector, ole.num_mini_fat_sectors, "MiniFAT")
-    root = ole.root
-    if not err and root.size: err = walk("big", ole.fat, root.isectStart, (root.size + ss - 1) // ss, "MiniStream")
-    for e in ole.listdir(streams=True, storages=False):
-        if err: break
-        ent = ole.entry(e)
-        if ent.size == 0: continue
-        if ent.size >= ole.minisectorcutoff: err = walk("big", ole.fat, ent.isectStart, (ent.size + ss - 1) // ss, "/".join(e))
-        elif ole.minifat is not None: err = walk("mini", ole.minifat, ent.isectStart, (ent.size + ole.minisectorsize - 1) // ole.minisectorsize, "/".join(e))
-    return err
-
-
-###############################################################################################################################
-# property set streamek (\x05SummaryInformation, \x05DocumentSummaryInformation, ...): MS-OLEPS szerkezet ellenorzese.
-# Szinte minden OLE alapu program irja oket, igy az ismeretlen formatumoknal is van legalabb egy tartalmi ellenorzes.
-###############################################################################################################################
-
-FMTID_SummaryInformation = b'\xe0\x85\x9f\xf2\xf9\x4f\x68\x10\xab\x91\x08\x00\x2b\x27\xb3\xd9'
-
-# VT tipus -> fix meret (byte)
-vt_sizes = {0: 0, 1: 0, 2: 2, 3: 4, 4: 4, 5: 8, 6: 8, 7: 8, 0x0A: 4, 0x0B: 2, 0x10: 1, 0x11: 1, 0x12: 2, 0x13: 4, 0x14: 8, 0x15: 8, 0x16: 4, 0x17: 4, 0x40: 8, 0x48: 16}
-
-
-def vt_value_end(d, p, vt, end, unicode):
-    """
-    egy (tipus fejlec nelkuli) ertek vege, vagy None ha ismeretlen tipus. Kivetelt dob, ha kilog.
-    unicode: a property set kodlapja CP_WINUNICODE (1200), ekkor a vektorban levo LPSTR-ek 4 byte-ra kerekitettek
-    """
-    def pad4(x): return (x + 3) & ~3
-    if vt in vt_sizes: return p + vt_sizes[vt]
-    if vt in (0x08, 0x1E, 0x41, 0x47):         # BSTR, LPSTR, BLOB, CF: meret + adat
-        n, = unpack_from('<L', d, p)
-        return p + 4 + n
-    if vt == 0x1F:                              # LPWSTR: karakterszam + UTF-16
-        n, = unpack_from('<L', d, p)
-        return p + 4 + n * 2
-    if vt & 0x1000:                             # VECTOR
-        cnt, = unpack_from('<L', d, p)
-        base = vt & 0xFFF
-        p += 4
-        if cnt > end - p: raise ValueError("vector count %d too large" % cnt)
-        for i in range(cnt):
-            if base == 0x0C:                    # VARIANT: minden elem sajat tipussal
-                t, = unpack_from('<H', d, p)
-                q = vt_value_end(d, p + 4, t, end, unicode)
-                if q is None: return None
-                p = pad4(q)
-            else:
-                q = vt_value_end(d, p, base, end, unicode)
-                if q is None: return None
-                p = pad4(q) if base in (0x1F, 0x41, 0x47) or (base in (0x08, 0x1E) and unicode) else q
-        return p
-    return None
-
-
-def check_propset(d, log):
-    """ visszaad: (hibauzenet vagy None, AppName vagy None) """
-    if len(d) < 48: return "stream too short (%d bytes)" % len(d), None
-    order, version, sysid = unpack_from('<HHL', d, 0)
-    nsets, = unpack_from('<L', d, 24)
-    if order != 0xFFFE or version > 1 or nsets < 1 or nsets > 2 or 28 + nsets * 20 > len(d):
-        return "bad header (byte order 0x%04X, version %d, %d sets)" % (order, version, nsets), None
-    appname = None
-    for s in range(nsets):
-        fmtid = d[28 + s * 20:44 + s * 20]
-        off, = unpack_from('<L', d, 44 + s * 20)
-        def valid(o):
-            if o < 0 or o + 8 > len(d): return False
-            size, nprop = unpack_from('<LL', d, o)
-            return o + size <= len(d) and 8 + nprop * 8 <= size
-        if not valid(off):
-            # a Mac-es Excel paratlan hosszu elso set utan 1 byte-tal elszamolja a masodik set helyet
-            near = [o for o in (off - 1, off + 1, off - 2, off + 2, off - 3, off + 3) if valid(o)]
-            if not near:
-                if off + 8 > len(d): return "property set #%d offset %d outside of stream" % (s, off), None
-                return "property set #%d: bad size %d / %d properties" % ((s,) + unpack_from('<LL', d, off)), None
-            log("WARNING: property set #%d found at %d instead of %d" % (s, near[0], off))
-            off = near[0]
-        size, nprop = unpack_from('<LL', d, off)
-        end = off + size
-        codepage = None
-        for i in range(nprop):   # a kodlap (property 1) kell a stringek meretehez
-            pid, poff = unpack_from('<LL', d, off + 8 + i * 8)
-            if pid == 1 and poff + 8 <= size and unpack_from('<H', d, off + poff)[0] == 2: codepage, = unpack_from('<H', d, off + poff + 4)
-        for i in range(nprop):
-            pid, poff = unpack_from('<LL', d, off + 8 + i * 8)
-            if poff < 8 + nprop * 8 or poff + 4 > size: return "property set #%d: property 0x%X offset %d outside of set" % (s, pid, poff), None
-            if pid == 0: continue   # dictionary: nincs tipus fejlece
-            vt, = unpack_from('<H', d, off + poff)
-            try:
-                q = vt_value_end(d, off + poff + 4, vt, end, codepage == 1200)
-            except Exception as e:
-                return "property set #%d: property 0x%X (type 0x%X) unreadable: %s" % (s, pid, vt, e), None
-            if q is not None and q > end: return "property set #%d: property 0x%X (type 0x%X) value outside of set" % (s, pid, vt), None
-            if fmtid == FMTID_SummaryInformation and pid == 0x12 and vt == 0x1E:   # PIDSI_APPNAME
-                n, = unpack_from('<L', d, off + poff + 4)
-                raw = d[off + poff + 8:off + poff + 8 + n]
-                try: appname = raw.decode('utf-16le' if codepage == 1200 else 'cp%d' % codepage if codepage else 'latin1').rstrip('\x00')
-                except Exception: appname = raw.decode('latin1').rstrip('\x00')
-    return None, appname
 
 
 ###############################################################################################################################
@@ -755,95 +312,13 @@ def check_ppt_records(ole, pd, log):
 ###############################################################################################################################
 
 
-###############################################################################################################################
-# OLE_INFO: letrehozas / utolso mentes datuma, szerzo, utoljara mentette, cim, program (a visszaallitott fileok azonositasahoz)
-# Forras: a SummaryInformation property set; ha nincs benne utolso mentes (az Excel altalaban nem irja), a gyoker konyvtar
-# bejegyzes modositasi ideje. Minden datum helyi idoben (a fileban UTC FILETIME).
-
-def _filetime(x):
-    """ FILETIME (100ns 1601 ota, UTC) -> helyi ido datetime, ertelmetlen erteknel None """
-    try:
-        t = (datetime.datetime(1601, 1, 1) + datetime.timedelta(microseconds=x // 10)).replace(tzinfo=datetime.timezone.utc).astimezone().replace(tzinfo=None)
-        if datetime.datetime(1980, 1, 1) <= t <= datetime.datetime.now() + datetime.timedelta(days=2): return t
-    except Exception:
-        pass
-    return None
-
-def summary_properties(d):
-    """ a SummaryInformation stream (sertult is) -> {pid: ertek}, csak a szoveg (VT_LPSTR/LPWSTR) es FILETIME tipusok """
-    props = {}
-    try:
-        if len(d) < 48 or d[28:44] != FMTID_SummaryInformation: return props
-        off, = unpack_from('<L', d, 44)
-        size, nprop = unpack_from('<LL', d, off)
-        vals = []
-        codepage = None
-        for i in range(min(nprop, 1000)):
-            pid, poff = unpack_from('<LL', d, off + 8 + i * 8)
-            p = off + poff
-            if p + 8 > len(d): continue
-            vt, = unpack_from('<H', d, p)
-            if pid == 1 and vt == 2: codepage = unpack_from('<H', d, p + 4)[0]
-            vals.append((pid, vt, p + 4))
-        enc = {1200: 'utf-16le', 65001: 'utf-8', 10000: 'mac_roman'}.get(codepage, 'cp%d' % codepage if codepage else 'cp1252')
-        for pid, vt, p in vals:
-            try:
-                if vt == 0x1E:
-                    n, = unpack_from('<L', d, p)
-                    raw = d[p + 4:p + 4 + min(n, 65536)]
-                    try: v = raw.decode(enc)
-                    except Exception: v = raw.decode('latin1')
-                    props[pid] = v.split('\x00')[0].strip()
-                elif vt == 0x1F:
-                    n, = unpack_from('<L', d, p)
-                    props[pid] = d[p + 4:p + 4 + min(n, 32768) * 2].decode('utf-16le', 'replace').split('\x00')[0].strip()
-                elif vt == 0x40:
-                    props[pid] = _filetime(unpack_from('<Q', d, p)[0])
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return props
-
-def ole_info(ole):
-    """ visszaad: (formatum verzio, letrehozas, modositas, datum forrasa, utoljara mentette, szerzo, cim, program) """
-    fver = ""
-    try:
-        if ole.exists('Workbook'): fver = "BIFF8"
-        elif ole.exists('Book'): fver = "BIFF5"
-        elif ole.exists('WordDocument'):
-            w = ole.openstream('WordDocument').read(4)
-            fver = {0xA5DC: "Word6/95", 0xA5EC: "Word97+"}.get(unpack_from('<H', w, 0)[0], "")
-        elif ole.exists('PowerPoint Document'): fver = "PPT97+"
-    except Exception:
-        pass
-    props = {}
-    try:
-        if ole.exists('\x05SummaryInformation'): props = summary_properties(ole.openstream('\x05SummaryInformation').read())
-    except Exception:
-        pass
-    created, modified = props.get(0x0C), props.get(0x0D)
-    src_c = src_m = "meta"
-    root = ole.root
-    if not created:
-        created, src_c = _filetime(getattr(root, 'createTime', 0) or 0), "ole"
-    if not modified:
-        modified, src_m = _filetime(getattr(root, 'modifyTime', 0) or 0), "ole"
-    fmt = lambda t: t.strftime('%Y-%m-%d %H:%M:%S') if t else ""
-    src = "" if not created and not modified else src_c if src_c == src_m or not created or not modified else src_c + "/" + src_m
-    if not created and modified: src = src_m
-    if created and not modified: src = src_c
-    get = lambda pid: props.get(pid) if isinstance(props.get(pid), str) else ""
-    return fver, fmt(created), fmt(modified), src, get(8), get(4), get(2), get(0x12)
-
-
 def testole(d, debug=False, fname=""):
     """
     visszaad: (hibapont, kiterjesztes). Alapbol csak a szamolt hibakat irja ki, debug=True eseten mindent.
     Minden filerol kiir egy sort (grep -a -val CSV-be gyujtheto):
       OLE_INFO;filenev;formatum verzio;tipus;letrehozas;utolso mentes;datum forrasa (meta|ole);utoljara mentette;szerzo;cim;program;OK|BAD
     Thumbs.db eseten belyegkepenkent:
-      THUMB_INFO;filenev;sorszam;az eredeti kep neve;datum;OK|BAD|MISSING|- (- : nincs testjpeg)
+      THUMB_INFO;filenev;sorszam;az eredeti kep neve;datum;OK|BAD|MISSING
     """
     info = [("",) * 8, []]
     errcnt, ext = _testole(d, debug, info)

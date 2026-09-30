@@ -46,8 +46,7 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 - **Fájldátum igazítása:** ha a `fileinfo.py` elején `fix_filedatetime = True`, a vizsgált fájl módosítási idejét
   (mtime, atime) a belőle kiolvasott utolsó mentés dátumára állítja, ha az nincs, a létrehozáséra (mint a `touch -d`).
   Visszaállított fájloknál hasznos, ahol a fájl dátuma a visszaállítás ideje lett. Alapból ki van kapcsolva. Minden
-  `XXX_INFO`-t író formátumra működik, a sérült (BAD) fájlokra is, ha van bennük dátum. A `testole.py` önmagában
-  (`fileinfo.py` nélkül) használva nem állít dátumot.
+  `XXX_INFO`-t író formátumra működik, a sérült (BAD) fájlokra is, ha van bennük dátum.
 
 ## Összefoglaló táblázat
 
@@ -193,9 +192,21 @@ epub (a `mimetype` tag alapján), SPSS Viewer (spv), jar, apk, egyéb zip.
     Az MS Office minden tagnak 1980-01-01 00:00-t ír, ezt (és a jövőbeli dátumokat) figyelmen kívül hagyja.
   - Minden dátum helyi időben (az OOXML UTC-ben tárol, átszámolva). Sérült metaadat-tagból annyit olvas ki, amennyit lehet.
 
-## OLE2 / Compound File (`testole.py`)
+## OLE2 / Compound File (`testole.py`, `parseole.py`)
 
 **Felismerés:** `D0 CF 11 E0 A1 B1 1A E1`. Típus: doc, xls, ppt, db (Thumbs.db), egyéb OLE.
+
+**Felépítés:**
+- **`parseole.py`**: önálló OLE-olvasó az olefile helyett, csak a Python standard könyvtárára épül, más programokból
+  (pl. vírusellenőrző) is használható. Benne van:
+  - `OleFile` (szigorú és megengedő mód),
+  - a konténer-ellenőrzések (`check_fat`, `check_propset`),
+  - a metaadatok kiolvasása (`summary_properties`, `ole_info`),
+  - a `Thumbs.db` katalógus beolvasása (`thumbs_catalog`).
+
+  Parancssorból a streamek listáját és a metaadatokat írja ki: `pypy parseole.py fájl...`
+- **`testole.py`**: a `parseole` köré épül. A fájl tartalmát ellenőrzi tovább (doc/xls/ppt szerkezet, beágyazott képek,
+  bélyegképek), és kiírja az `OLE_INFO`/`THUMB_INFO` sorokat.
 
 **Konténer (minden OLE fájlra, bármilyen programé):**
 - Saját OLE-olvasó (MS-CFB), külső könyvtár nélkül. Az olefile megnyitáskori ellenőrzéseit követi:
@@ -232,8 +243,7 @@ epub (a `mimetype` tag alapján), SPSS Viewer (spv), jar, apk, egyéb zip.
   directory** minden bejegyzése egy rekord elejére mutat. Titkosított prezentációnál csak a Current User.
 
 **Beágyazott képek:** a doc `Data`, a ppt `Pictures` streamjéből és az xls MSODRAWINGGROUP rekordjaiból a JPEG és
-PNG képeket (OfficeArt BLIP) kivágja, és a `testjpeg`-gel / `testpng`-vel ellenőrzi. Ha a `testole.py`-t önmagában
-használják, és a `testjpeg`/`testpng` nincs meg, a képek ellenőrzése kimarad (debug figyelmeztetés), ez nem hiba.
+PNG képeket (OfficeArt BLIP) kivágja, és a `testjpeg`-gel / `testpng`-vel ellenőrzi.
 
 **Thumbs.db (a Windows XP/2003 Intéző bélyegkép-gyorsítótára, `Catalog` stream):** a visszaállító programok gyakran
 `.doc` néven mentik, mert OLE fájl.
@@ -244,10 +254,9 @@ használják, és a `testjpeg`/`testpng` nincs meg, a képek ellenőrzése kimar
 - Hibás vagy hiányzó bélyegkép → hiba. A mintákon (187 fájl, 17249 bélyegkép) mind ép.
 - **`THUMB_INFO` sor** bélyegképenként (a mappa egykori képeinek listája, akkor is, ha maguk a képek elvesztek):
 
-  `THUMB_INFO;fájlnév;sorszám;az eredeti kép neve;dátum;OK|BAD|MISSING|-`
+  `THUMB_INFO;fájlnév;sorszám;az eredeti kép neve;dátum;OK|BAD|MISSING`
 
-  A dátum a kép módosítási ideje a bélyegkép készítésekor (helyi idő). A `-` azt jelenti, hogy a képet nem
-  ellenőrizte (nincs `testjpeg`). CSV: `grep -a '^THUMB_INFO;' kimenet.txt > thumbs.csv`.
+  A dátum a kép módosítási ideje a bélyegkép készítésekor (helyi idő). CSV: `grep -a '^THUMB_INFO;' kimenet.txt > thumbs.csv`.
 
 **`OLE_INFO` sor** (minden fájlról, debug módtól függetlenül), pl. `grep -a ^OLE_INFO kimenet.txt > ole.csv`:
 
@@ -261,13 +270,16 @@ használják, és a `testjpeg`/`testpng` nincs meg, a képek ellenőrzése kimar
   órára egyezik a fájl mtime-jával.
 - Ha a fájl a megnyitáskor hibás, a metaadatokat engedékeny módban olvassa újra, így sérült fájlból is kijön,
   amennyi kiolvasható.
-- **Megengedő mód más programoknak** (pl. heurisztikus vírusellenőrzés): `OleFile(data, strict=False)`.
+- **Megengedő mód más programoknak** (pl. heurisztikus vírusellenőrzés): `parseole.OleFile(data, strict=False)`.
   - Csak akkor dob kivételt, ha a fájl nem OLE. Minden más hiba az `issues` listába kerül, és a sérült fájlból is
     kiolvassa, amit lehet (`listdir()`, `exists()`, `openstream()`).
   - Szándékosan rosszindulatú fájlok ellen is védett:
     - a szektorláncokban figyeli a ciklusokat,
     - egy lánc nem lehet hosszabb a FAT-nál,
     - a hibás vagy óriási FAT/DIFAT-méreteket a fájl méretére vágja,
+    - értelmetlen szektorméretnél (pl. 1 bájt) a verzió szerinti szabványos méretet használja (512/4096, mini: 64),
+      így egy fejlécbájt átírásával sem lehet elrejteni a tartalmat vagy lelassítani a vizsgálatot,
+    - a könyvtárfát rekurzió nélkül járja be, így a mélyen egymásba ágyazott storage-ok sem okoznak `RecursionError`-t,
     - az összes kiolvasott adat mennyisége a fájlmérettel arányos, így az egymásra mutató streamekkel sem lehet
       memóriát vagy időt elfogyasztani.
   - A `testole` saját ellenőrzése a szigorú módot (`strict=True`, alapértelmezett) használja.
