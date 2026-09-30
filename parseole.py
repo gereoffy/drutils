@@ -97,7 +97,7 @@ class OleFile:
 
     def check_duplicate(self, first, mini=False):
         """ ket stream nem kezdodhet ugyanazon a szektoron """
-        if not mini and first in (DIFSECT, FATSECT, ENDOFCHAIN, FREESECT): return
+        if first in (DIFSECT, FATSECT, ENDOFCHAIN, FREESECT): return   # nem valodi kezdo szektor (a hibat a lanc olvasasa jelzi)
         used = self.used_minifat if mini else self.used_fat
         if first in used: self.defect(INCORRECT, "Stream referenced twice")
         used.add(first)
@@ -134,6 +134,9 @@ class OleFile:
             s = self.first_difat_sector
             if not self.strict: nb = min(nb, self.num_difat_sectors, self.nb_sect)   # hibas/oriasi szamok (DoS vedelem)
             for i in range(nb):
+                if s in (ENDOFCHAIN, FREESECT):
+                    self.defect(INCORRECT, "incorrect DIFAT, chain ends after %d of %d sectors" % (i, nb))
+                    break
                 b = self.getsect(s)
                 if b is None: break
                 v = self.sect2list(b)
@@ -152,10 +155,9 @@ class OleFile:
         nb = (size + ss - 1) // ss
         if nb > len(fat): self.defect(INCORRECT, "malformed OLE document, stream too large")
         if size == 0 and sect != ENDOFCHAIN: self.defect(INCORRECT, "incorrect OLE sector index for empty stream")
-        seen = None
-        if not self.strict:
-            nb = min(nb, len(fat))   # ciklus nelkul a lanc nem lehet hosszabb a FAT-nal
-            seen = set()
+        seen = set()                 # ciklus a lancban: ismetlodo adat helyett hiba
+        budget = not self.strict
+        if budget: nb = min(nb, len(fat))   # ciklus nelkul a lanc nem lehet hosszabb a FAT-nal
         out = []
         for i in range(nb):
             if sect == ENDOFCHAIN:
@@ -165,11 +167,11 @@ class OleFile:
             if sect >= len(fat):
                 self.defect(INCORRECT, "incorrect OLE FAT, sector index out of range")
                 break
-            if seen is not None:
-                if sect in seen:
-                    self.defect(INCORRECT, "loop in OLE sector chain")
-                    break
-                seen.add(sect)
+            if sect in seen:
+                self.defect(INCORRECT, "loop in OLE sector chain")
+                break
+            seen.add(sect)
+            if budget:
                 self.read_budget -= ss
                 if self.read_budget < 0:
                     self.defect(INCORRECT, "OLE read limit exceeded (overlapping streams?)")
@@ -252,7 +254,9 @@ class OleFile:
             parent.kids_dict[low] = child
             todo += [(parent, child.left), (parent, child.right)]
             # a stream gyerek mutatoja is NOSTREAM kell legyen: ha nem, azt is bejarjuk (mint az olefile), igy a serules kiderul
-            if child.child != NOSTREAM: todo.append((child, child.child))
+            if child.child != NOSTREAM:
+                if child.type == 2: self.defect(POTENTIAL, "OLE stream entry with child pointer")
+                todo.append((child, child.child))
         for e in self.direntries:
             if e is not None: e.kids.sort(key=lambda k: k.name)
 
@@ -529,9 +533,10 @@ def ole_info(ole):
     if not modified:
         modified, src_m = _filetime(getattr(root, 'modifyTime', 0) or 0), "ole"
     fmt = lambda t: t.strftime('%Y-%m-%d %H:%M:%S') if t else ""
-    src = "" if not created and not modified else src_c if src_c == src_m or not created or not modified else src_c + "/" + src_m
-    if not created and modified: src = src_m
-    if created and not modified: src = src_c
+    if not created and not modified: src = ""
+    elif not created: src = src_m
+    elif not modified or src_c == src_m: src = src_c
+    else: src = src_c + "/" + src_m
     get = lambda pid: props.get(pid) if isinstance(props.get(pid), str) else ""
     return fver, fmt(created), fmt(modified), src, get(8), get(4), get(2), get(0x12)
 
