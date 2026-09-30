@@ -12,10 +12,9 @@
 
 from struct import unpack_from, pack
 import datetime
-import re
 import zlib
 
-from fileinfo import set_file_time
+from fileinfo import print_info, result
 
 
 ###############################################################################################################################
@@ -780,10 +779,7 @@ def testdwg(data, debug=False, fname=""):
         if err: print("ERROR! DWG %s: %s" % (ver, err))
         res = 10 if err else 0
     title, author, saved, created, modified = dwg_info(data, ver) if ver in checkers else ("",) * 5
-    def clean(x): return re.sub(r'[\x00-\x1f\x7f\ufeff]+', ' ', str(x).replace(";", ",")).strip()
-    print("DWG_INFO;" + ";".join(clean(x) for x in (fname, ver, RELEASES.get(ver, ""), created, modified, saved, author, title,
-                                                  "OK" if res == 0 else "BAD" if res > 0 else "DUNNO")))
-    set_file_time(fname, created, modified)
+    print_info("DWG", (fname, ver, RELEASES.get(ver, ""), created, modified, saved, author, title, result(res)))
     return res
 
 

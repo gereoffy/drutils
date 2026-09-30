@@ -3,11 +3,10 @@
 # OLE2 (Compound File) alapu fileok ellenorzese: doc, xls, ppt, Thumbs.db, msg, ...
 # Az OLE olvaso (a streamek es a metaadatok kiolvasasa) a parseole.py-ban van, itt az ervenyesseg ellenorzese.
 
-import re
 from struct import unpack, unpack_from
 
 from parseole import OleFile, check_fat, check_propset, ole_info, thumbs_catalog
-from fileinfo import set_file_time
+from fileinfo import print_info, result
 from testjpeg import testjpeg
 from testpng import testpng
 
@@ -322,13 +321,11 @@ def testole(d, debug=False, fname=""):
     """
     info = [("",) * 8, []]
     errcnt, ext = _testole(d, debug, info)
-    def clean(x): return re.sub(r'[\x00-\x1f\x7f\ufeff]+', ' ', str(x).replace(";", ",")).strip()
     i = info[0]
-    print("OLE_INFO;" + ";".join(clean(x) for x in (fname,) + i[:1] + (ext,) + i[1:] + ("OK" if errcnt == 0 else "BAD" if errcnt > 0 else "DUNNO",)))
-    set_file_time(fname, i[1], i[2])
+    print_info("OLE", (fname,) + i[:1] + (ext,) + i[1:] + (result(errcnt),))
     # Thumbs.db: a belyegkepek eredeti fajlnevei (a mappa kepei), datummal
     for idx, name, t, state in info[1]:
-        print("THUMB_INFO;" + ";".join(clean(x) for x in (fname, idx, name, t.strftime('%Y-%m-%d %H:%M:%S') if t else "", state)))
+        print_info("THUMB", (fname, idx, name, t, state), set_time=False)
     return errcnt, ext
 
 

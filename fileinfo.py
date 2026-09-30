@@ -25,10 +25,13 @@ def fmt(t):
 def result(res):
     return "OK" if res == 0 else "BAD" if res > 0 else "DUNNO"
 
-def print_info(prefix, fields):
-    """ fields: (filenev, verzio, tipus, letrehozas, utolso mentes, ...) """
+def print_info(prefix, fields, set_time=True):
+    """
+    fields: (filenev, verzio, tipus, letrehozas, utolso mentes, ...). set_time: fix_filedatetime eseten a file datuma a
+    4./5. mezobol (False: ha a sor nem a filerol szol, pl. THUMB_INFO)
+    """
     print(prefix + "_INFO;" + ";".join(clean(fmt(x) if isinstance(x, datetime.datetime) else x) for x in fields))
-    set_file_time(fields[0], fields[3], fields[4])
+    if set_time: set_file_time(fields[0], fields[3], fields[4])
 
 def set_file_time(fname, created, modified):
     """ fix_filedatetime eseten a file mtime/atime-ja := utolso mentes (ha nincs: letrehozas). datetime vagy 'YYYY-MM-DD HH:MM:SS' """
