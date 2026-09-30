@@ -1,18 +1,26 @@
 # drutils - Data recovery utilities
 
-raid-stat.c - raw disk visualization tool :)
+scandisk.c  - raw disk visualization tool useful for NTFS volumes (MFT, INDX, document and picture files search)
+
+raid-stat.c - raw disk visualization tool useful for RAID volume members
 
 indx3.c     - raw disk data scanner, tries to detect file types, partitions and ntfs metadata
 
 olefix.c    - OLE file (doc/xls/etc) analyzer & fixer
 
-lstree.py   - ntfs MFT file parser and fixer (recovers files from raw device using oob MFT table) see LSTREE.md
+jpgfix.c    - JPEG file fixer
 
-lsindx.py   - ntfs MFT/INDX directory entries parser/lister (rebuilds file tree using only INDX entries) see LSINDX.md
+# NTFS data recovery tools for broken or missing MFT disks:
+
+lstree.py   - ntfs MFT file parser and fixer (recovers files from raw device using extracted MFT file) see LSTREE.md
+
+lsindx.py   - ntfs INDX directory entries parser/lister (rebuilds directory tree using only INDX entries) see LSINDX.md
 
 fixoverlay  - fix "truncated" files using PhotoRec's report.xml (eg. extra metadata appended to jpeg files)
 
 indxrename  - link PhotoRec-recovered files to their original filename and dirtree-location based on size/date heuristics using INDEX.pck of lsindx.py
+
+# file consistency checker / validator for most common filetypes (documents, pictures, video, cad...)
 
 testfiles.py - file content validator/verifier (detects damaged/truncated files, e.g. after data recovery), supports:
   - old msoffice documents (doc/xls/ppt and other OLE2 files)
@@ -21,7 +29,7 @@ testfiles.py - file content validator/verifier (detects damaged/truncated files,
   - CAD drawings           (dxf, dwg R10-2018)
   - SPSS data files        (sav/zsav)
   - video/audio containers (mp4, mov, m4a, 3gp and heic/avif images - ISO Base Media File Format)
-  - pdf
+  - pdf                    supports extended parser at https://github.com/gereoffy/pdfparse3
 
 File types are detected by content, not by extension. All-zero files are reported as BAD,
 extension/content mismatches as warnings. See FORMATS.md for what exactly is checked per format.
@@ -41,13 +49,13 @@ testpsd.py  - psd/psb parser & validator
 testwmf.py  - wmf/emf parser & validator  
 testzip.py  - zip-based formats (office, odf, epub, spv...) validator  
 testole.py  - OLE2 (doc/xls/ppt...) validator, built on parseole  
-parseole.py - standalone OLE2 reader (olefile replacement, strict & lenient mode, metadata), no dependencies  
 testsav.py  - SPSS sav/zsav parser & validator  
 testdxf.py  - dxf (ASCII & binary) parser & validator  
 testdwg.py  - dwg integrity checker (CRC/checksums/Reed-Solomon)  
 testmp4.py  - mp4/mov/heic (ISOBMFF) structure & sample table validator  
+testpdf.py  - old pdf parser & validator  (used as fallback when pdfparse3 is not available)
 fileinfo.py - common code of the per-file metadata lines (XXX_INFO: dates, author, program, device)  
-testpdf.py  - pdf  parser & validator  
+parseole.py - standalone OLE2 reader (olefile replacement, strict & lenient mode, metadata), no dependencies  
 
 Usage (directories are checked recursively, -j N: N parallel worker processes, output is identical to a sequential run):
 
