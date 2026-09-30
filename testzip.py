@@ -8,6 +8,8 @@ import zlib
 import zipfile
 import xml.parsers.expat
 
+from fileinfo import set_file_time
+
 # OpenDocument / epub: a 'mimetype' tag tartalma alapjan
 mimetypes = {
     b'application/vnd.oasis.opendocument.text': "odt",
@@ -213,6 +215,7 @@ def testzip(data, debug=False, fname=""):
     errcnt, ext, info = _testzip(data, debug)
     def clean(x): return re.sub(r'[\x00-\x1f\x7f\ufeff]+', ' ', str(x).replace(";", ",")).strip()
     print("ZIP_INFO;" + ";".join(clean(x) for x in (fname,) + info[:1] + (ext,) + info[1:] + ("OK" if errcnt == 0 else "BAD",)))
+    set_file_time(fname, info[1], info[2])
     return errcnt, ext
 
 

@@ -15,6 +15,8 @@ import datetime
 import re
 import zlib
 
+from fileinfo import set_file_time
+
 
 ###############################################################################################################################
 # CRC16 (0xA001 polinom, a DWG a 0xC0C1 kezdoerteket hasznalja)
@@ -513,7 +515,10 @@ def check_r2007(d, ver, log):
     clen, = unpack_from('<l', data, 24)
     try:
         H = unpack_from('<34Q', decompress_r2007(data[32:32 + clen], 0x110) if clen > 0 else data[32:32 + 0x110], 0)
-        if H[0] != 0x70 or H[1] != n: return "file header: size %d in header, file is %d bytes" % (H[1], n)
+        if H[0] != 0x70: return "bad file header"
+        if H[1] > n: return "file header: size %d in header, file is %d bytes (truncated)" % (H[1], n)
+        # visszaallitott fileoknal a vegen lehet szemet (a klaszter vegeig kiirt resz): nem hiba
+        if H[1] < n: log("WARNING: %d extra bytes after the end of file (size %d in header)" % (n - H[1], H[1]))
         pm = _r2007_system_page(d, 0x480 + H[7], H[10], H[11], H[3])
         pages = {}
         off = 0
@@ -598,12 +603,18 @@ def _julian(day, ms):
         return ""
 
 def _header_dates(h, p, ver):
-    """ a header valtozok bitfolyamabol a TDCREATE/TDUPDATE (R13-R2004). p: a bitfolyam eleje (byte) """
+    """
+    a header valtozok bitfolyamabol a TDCREATE/TDUPDATE (R13-R2007). p: a bitfolyam eleje (byte).
+    R2007: az elejen RL (meret bitekben), a szovegek kulon szoveg folyamban vannak (itt nincsenek), nincs MENUNAME.
+    """
     r = _Bits(h, p)
     r13_14 = ver in ("AC1012", "AC1014")
-    r2004 = ver == "AC1018"
+    r2004 = ver in ("AC1018", "AC1021")          # R2004+ mezok
+    r2007 = ver == "AC1021"
+    if r2007: r.raw(4)
     for _ in range(4): r.BD()
-    for _ in range(4): r.TV()
+    if not r2007:
+        for _ in range(4): r.TV()
     r.BL(); r.BL()
     if r13_14: r.BS()
     if not r2004: r.H()                          # current viewport entity header
@@ -622,7 +633,7 @@ def _header_dates(h, p, ver):
     if r2004: r.BL(); r.BL(); r.BL()
     for _ in range(5 + 14): r.BS()               # USERI1-5, SPLINESEGS..TEXTQLTY
     for _ in range(9 + 5 + 4 + 3): r.BD()        # LTSCALE..PLINEWID, USERR1-5, CHAMFERA-D, FACETRES CMLSCALE CELTSCALE
-    r.TV()                                       # MENUNAME
+    if not r2007: r.TV()                         # MENUNAME (R13-R2004)
     c = (r.BL(), r.BL())
     u = (r.BL(), r.BL())
     return _julian(*c), _julian(*u)
@@ -729,6 +740,9 @@ def dwg_info(d, ver):
         elif ver == "AC1021":
             si = _r2007_section(d, "AcDb:SummaryInfo")
             if si: title, author, saved, created, modified = _parse_summaryinfo(si, True)
+            else:                                # nem AutoCAD-es irok: nincs SummaryInfo, a header valtozokbol
+                h = _r2007_section(d, "AcDb:Header")
+                if h: created, modified = _header_dates(h, 20, ver)
         else:
             si = _r2004_section(d, "AcDb:SummaryInfo")
             if si: title, author, saved, created, modified = _parse_summaryinfo(si, ver != "AC1018")
@@ -769,6 +783,7 @@ def testdwg(data, debug=False, fname=""):
     def clean(x): return re.sub(r'[\x00-\x1f\x7f\ufeff]+', ' ', str(x).replace(";", ",")).strip()
     print("DWG_INFO;" + ";".join(clean(x) for x in (fname, ver, RELEASES.get(ver, ""), created, modified, saved, author, title,
                                                   "OK" if res == 0 else "BAD" if res > 0 else "DUNNO")))
+    set_file_time(fname, created, modified)
     return res
 
 

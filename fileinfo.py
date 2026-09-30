@@ -5,8 +5,14 @@
 # Minden datum helyi idoben 'YYYY-MM-DD HH:MM:SS' formaban, az UTC forrasok atszamolva. Ures mezo: nincs (ertelmes) adat.
 
 import datetime
+import os
 import re
+import time
 from struct import unpack_from
+
+# True: a vizsgalt file modositasi idejet (mtime, atime) a belole kiolvasott utolso mentes datumara allitja (ha az nincs, a
+# letrehozasera), mint a "touch -d". Visszaallitott fileoknal hasznos, ahol a file datuma a visszaallitas ideje lett.
+fix_filedatetime = False
 
 
 def clean(x):
@@ -20,7 +26,22 @@ def result(res):
     return "OK" if res == 0 else "BAD" if res > 0 else "DUNNO"
 
 def print_info(prefix, fields):
+    """ fields: (filenev, verzio, tipus, letrehozas, utolso mentes, ...) """
     print(prefix + "_INFO;" + ";".join(clean(fmt(x) if isinstance(x, datetime.datetime) else x) for x in fields))
+    set_file_time(fields[0], fields[3], fields[4])
+
+def set_file_time(fname, created, modified):
+    """ fix_filedatetime eseten a file mtime/atime-ja := utolso mentes (ha nincs: letrehozas). datetime vagy 'YYYY-MM-DD HH:MM:SS' """
+    if not fix_filedatetime or not fname: return
+    t = modified or created
+    if not t: return
+    try:
+        if not isinstance(t, datetime.datetime): t = datetime.datetime.strptime(t, '%Y-%m-%d %H:%M:%S')
+        if not plausible(t): return
+        ts = time.mktime(t.timetuple())
+        os.utime(fname, (ts, ts))
+    except Exception as e:
+        print("WARNING: cannot set file time of %s: %r" % (fname, e))
 
 def plausible(t):
     return t if t is not None and datetime.datetime(1980, 1, 1, 0, 0, 2) <= t <= datetime.datetime.now() + datetime.timedelta(days=2) else None

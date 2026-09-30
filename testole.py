@@ -8,6 +8,11 @@ import io
 import re
 from struct import unpack, unpack_from
 
+try:
+    from fileinfo import set_file_time   # fix_filedatetime (a testole.py onmagaban is hasznalhato, akkor nincs)
+except ImportError:
+    def set_file_time(fname, created, modified): pass
+
 
 def P23Decode(value):
     try:
@@ -845,6 +850,7 @@ def testole(d, debug=False, fname=""):
     def clean(x): return re.sub(r'[\x00-\x1f\x7f\ufeff]+', ' ', str(x).replace(";", ",")).strip()
     i = info[0]
     print("OLE_INFO;" + ";".join(clean(x) for x in (fname,) + i[:1] + (ext,) + i[1:] + ("OK" if errcnt == 0 else "BAD" if errcnt > 0 else "DUNNO",)))
+    set_file_time(fname, i[1], i[2])
     # Thumbs.db: a belyegkepek eredeti fajlnevei (a mappa kepei), datummal
     for idx, name, t, state in info[1]:
         print("THUMB_INFO;" + ";".join(clean(x) for x in (fname, idx, name, t.strftime('%Y-%m-%d %H:%M:%S') if t else "", state)))

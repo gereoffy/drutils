@@ -43,6 +43,11 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
   CSV-be gyűjtés: `grep -a '^JPG_INFO;' kimenet.txt > jpg.csv`. A `-a` kell, mert a kimenet más soraiban lehet
   bináris szemét, és akkor a grep az egész bemenetet binárisnak veszi, és elnyeli a sorokat. A közös rész:
   `fileinfo.py`.
+- **Fájldátum igazítása:** ha a `fileinfo.py` elején `fix_filedatetime = True`, a vizsgált fájl módosítási idejét
+  (mtime, atime) a belőle kiolvasott utolsó mentés dátumára állítja, ha az nincs, a létrehozáséra (mint a `touch -d`).
+  Visszaállított fájloknál hasznos, ahol a fájl dátuma a visszaállítás ideje lett. Alapból ki van kapcsolva. Minden
+  `XXX_INFO`-t író formátumra működik, a sérült (BAD) fájlokra is, ha van bennük dátum. A `testole.py` önmagában
+  (`fileinfo.py` nélkül) használva nem állít dátumot.
 
 ## Összefoglaló táblázat
 
@@ -321,10 +326,13 @@ ellenőrzőösszegeit.
   `DWG_INFO;fájlnév;verzió;kiadás;létrehozás;utolsó mentés;utoljára mentette;szerző;cím;OK|BAD|DUNNO`
 
   A dátumok forrása: R10–R12 a fejléc fix helye, R13–R2000 a fejlécváltozók bitfolyama, R2004+ az
-  `AcDb:SummaryInfo` szakasz (ha hiányzik, R2004-ben a fejlécváltozók). A „utoljára mentette”, „szerző” és „cím” csak
+  `AcDb:SummaryInfo` szakasz (ha hiányzik, R2004-ben és R2007-ben a fejlécváltozók; a mintákon, ahol mindkettő megvan,
+  a kettő pontosan egyezik). A „utoljára mentette”, „szerző” és „cím” csak
   R2004+-ban van. Az üres mező azt jelenti, hogy a fájlban nincs érvényes érték (egyes nem AutoCAD programok
   nem töltik ki a dátumot; a létrehozás dátuma sablonból öröklött is lehet, pl. 1982/1992).
 - R2007-ben a nem RS-kódolt kis szakaszok (előnézet, összefoglaló) tartalma nem ellenőrizhető.
+- R2007: ha a fájl nagyobb a fejlécben megadott méretnél (visszaállításkor a klaszter végéig kiírt szemét), az csak
+  figyelmeztetés; ha kisebb (csonka), hiba.
 
 ## WMF, EMF (`testwmf.py`)
 
