@@ -20,16 +20,16 @@ fixoverlay  - fix "truncated" files using PhotoRec's report.xml (eg. extra metad
 
 indxrename  - link PhotoRec-recovered files to their original filename and dirtree-location based on size/date heuristics using INDEX.pck of lsindx.py
 
-# file consistency checker / validator for most common filetypes (documents, pictures, video, cad...)
+# testfiles - file consistency checker / validator / verifier / tester
 
-testfiles.py - file content validator/verifier (detects damaged/truncated files, e.g. after data recovery), supports:
-  - old msoffice documents (doc/xls/ppt and other OLE2 files)
+Detects damaged/truncated files, e.g. after data recovery, supports:
+  - old msoffice documents (doc/xls/ppt and other OLE2 files, Thumbs.db listing)
   - new office documents   (docx/xlsx/pptx, odt/ods/odp, epub, spv and other ZIP-based files)
   - image formats          (jpg, png/apng, gif, tif, psd/psb, wmf/emf)
   - CAD drawings           (dxf, dwg R10-2018)
   - SPSS data files        (sav/zsav)
   - video/audio containers (mp4, mov, m4a, 3gp and heic/avif images - ISO Base Media File Format)
-  - pdf                    supports extended parser at https://github.com/gereoffy/pdfparse3
+  - pdf                    supports new extended parser at https://github.com/gereoffy/pdfparse3
 
 File types are detected by content, not by extension. All-zero files are reported as BAD,
 extension/content mismatches as warnings. See FORMATS.md for what exactly is checked per format.
@@ -41,6 +41,7 @@ Pure Python, no external dependencies (OLE2 files are read by an own reader, ole
 PyPy is recommended for large data sets.
 
 
+testfiles.py- runs the tests bellow in parallel based on the detected filetype  
 testjpeg.py - jpeg parser & validator (full Huffman decoding, optional ASCII-art preview)  
 testpng.py  - png/apng parser & validator  
 testgif.py  - gif  parser & validator  
