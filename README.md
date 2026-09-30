@@ -16,20 +16,20 @@ lstree.py   - ntfs MFT file parser and fixer (recovers files from raw device usi
 
 lsindx.py   - ntfs INDX directory entries parser/lister (rebuilds directory tree using only INDX entries) see LSINDX.md
 
-fixoverlay  - fix "truncated" files using PhotoRec's report.xml (eg. extra metadata appended to jpeg files)
+fixoverlay.py - fix "truncated" files using PhotoRec's report.xml (eg. extra metadata appended to jpeg files)
 
-indxrename  - link PhotoRec-recovered files to their original filename and dirtree-location based on size/date heuristics using INDEX.pck of lsindx.py
+indxrename.py - link PhotoRec-recovered files to their original filename and dirtree-location based on size/date heuristics using INDEX.pck of lsindx.py
 
 # testfiles - file consistency checker / validator / verifier / tester
 
-Detects damaged/truncated files, e.g. after data recovery, supports:
+Detects damaged/truncated files, e.g. after data recovery, see FORMATS.md for details:
   - old msoffice documents (doc/xls/ppt and other OLE2 files, Thumbs.db listing)
   - new office documents   (docx/xlsx/pptx, odt/ods/odp, epub, spv and other ZIP-based files)
   - image formats          (jpg, png/apng, gif, tif, psd/psb, wmf/emf)
   - CAD drawings           (dxf, dwg R10-2018)
   - SPSS data files        (sav/zsav)
   - video/audio containers (mp4, mov, m4a, 3gp and heic/avif images - ISO Base Media File Format)
-  - pdf                    supports new extended parser at https://github.com/gereoffy/pdfparse3
+  - pdf                    (supports new extended parser at https://github.com/gereoffy/pdfparse3)
 
 File types are detected by content, not by extension. All-zero files are reported as BAD,
 extension/content mismatches as warnings. See FORMATS.md for what exactly is checked per format.
