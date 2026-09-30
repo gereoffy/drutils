@@ -1,4 +1,4 @@
-#! /usr/bin/python3.11
+#! /usr/bin/python3
 
 import sys
 sys.stdout.reconfigure(line_buffering=True)
@@ -8,7 +8,10 @@ import re
 import stat
 import traceback
 
-from testpdf import parse_pdf
+# New PDF parser: https://github.com/gereoffy/pdfparse3
+try:    from pdfparse3 import parse_pdf
+except: from testpdf import parse_pdf
+
 from testjpeg import testjpeg
 from testgif import testgif
 from testtif import testtif
@@ -21,20 +24,6 @@ from testdxf import testdxf
 from testdwg import testdwg
 from testwmf import testwmf,testemf
 from testmp4 import testmp4,mp4_kind
-
-
-###############################################################################################################################
-##############################################  PDF  ##########################################################################
-###############################################################################################################################
-
-def testpdf(d):
-  try:
-    c,errcnt=parse_pdf(d)
-#    if c==None: return 10 # not pdf file
-    return errcnt
-  except:
-    print("PDF.open-Exception!!! %s" % (traceback.format_exc()))
-    return 10
 
 
 ###############################################################################################################################
@@ -88,7 +77,7 @@ def detect_and_test(f,size,fnev):
     if d[0:4] in [b'$FL2',b'$FL3']: return testsav(d+f.read(),fname=fnev),"sav"
     if d[0]==0xD0 and d[1]==0xCF and d[2]==0x11 and d[3]==0xE0 and d[4]==0xA1 and d[5]==0xB1: return testole(d+f.read(),fname=fnev)#,"ole"
     if d[0]==0xff and d[1]==0xd8 and d[2]==0xff and d[3]>=0xC0: return testjpeg(d+f.read(),fname=fnev),"jpg"
-    if d.find(b'%PDF-',0,32)>=0: return testpdf(d+f.read()),"pdf"
+    if d.find(b'%PDF-',0,32)>=0: return parse_pdf(d+f.read())[1],"pdf"
 
 #    if d[0:4]==b'{\\rt': return testrtf(d),"rtf"
 
@@ -105,48 +94,87 @@ def detect_and_test(f,size,fnev):
 ##############################################  main  #########################################################################
 ###############################################################################################################################
 
+def testone(nn,size=None):
+    """ egy file vizsgalata: kiirja a fejlecet, a hibakat es a __result sort. visszaad: 1 (vizsgalt file) """
+    print("\n\n==================== %s ======================\n"%(nn))
+    try:
+        if size is None: size=os.stat(nn).st_size
+        with open(nn,"rb") as f: res,ext=testfile(f,size,nn)
+        print("__result=%s:"%("BAD" if res>0 else "OK" if res==0 else "DUNNO"),ext,nn)
+    except Exception as e:
+        print("Cannot open file:",repr(e))
+    return 1
+
 def testdir(path):
     cnt=0
     for n in os.listdir(path):
         nn=os.path.join(path,n)
-        print("\n\n==================== %s ======================\n"%(nn))
         try:
           s=os.stat(nn)
           if stat.S_ISDIR(s.st_mode):
+            print("\n\n==================== %s ======================\n"%(nn))
             cnt+=testdir(nn)
-          else:
-            with open(nn,"rb") as f: res,ext=testfile(f,s.st_size,nn)
-            if res>0:
-                print("__result=BAD:",ext,nn)
-                cnt+=1
-            if res==0:
-                print("__result=OK:",ext,nn)
-                cnt+=1
-            if res<0:
-                print("__result=DUNNO:",ext,nn)
-                cnt+=1
+            continue
         except Exception as e:
+          print("\n\n==================== %s ======================\n"%(nn))
           print("Cannot open file:",repr(e))
+          continue
+        cnt+=testone(nn,s.st_size)
     return cnt
 
-#testdir("/2/")
-testdir("png/")
-exit()
 
-f=open("/dev/sda","rb")
-for line in open("files.list","r"):
-# file 0x8264A000 1225172 935/982 JPG 'DSC_0018 R-2.jpg'
-    ll=line.split(" ",5)
-    print("\n\n==================== %s ======================\n"%(ll[5].strip()))
-    print(ll)
-    fpos=int(ll[1],16)
-    size=int(ll[2])
-    if size>2048*1024*1024: continue #######
-#    if size>2048*1024: continue #######
-    f.seek(fpos)
-    res,ext=testfile(f,size)
-    print((res,ext))
-    if res>0:
-        f.seek(fpos)
-        open("save/"+ll[1]+"."+ext,"wb").write(f.read(size))
+###############################################################################################################################
+# parhuzamos vizsgalat: a fileokat N folyamat vizsgalja (a GIL miatt a szalak nem futnanak parhuzamosan), a kimenetet
+# fileonkent osszegyujtik, es a fo folyamat az eredeti (soros futassal azonos) sorrendben irja ki, a sorok nem keverednek.
 
+def _walk(path):
+    """ a testdir sorrendjeben: ("dir", utvonal) / ("file", utvonal, meret) / ("error", utvonal, hiba) """
+    for n in os.listdir(path):
+        nn=os.path.join(path,n)
+        try:
+            s=os.stat(nn)
+        except Exception as e:
+            yield ("error",nn,e)
+            continue
+        if stat.S_ISDIR(s.st_mode):
+            yield ("dir",nn)
+            yield from _walk(nn)
+        else:
+            yield ("file",nn,s.st_size)
+
+def _worker(item):
+    import io, contextlib
+    buf=io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        try: testone(item[1],item[2])
+        except Exception as e: print("Cannot open file:",repr(e))
+    return buf.getvalue()
+
+def testdir_parallel(path,jobs):
+    """ mint a testdir, de jobs darab folyamattal. visszaad: a vizsgalt fileok szama """
+    import multiprocessing
+    items=list(_walk(path))
+    files=[it for it in items if it[0]=="file"]
+    # fork: a gyerek folyamatok orokoljak a betoltott modulokat (nem futtatjak ujra a foprogramot)
+    ctx=multiprocessing.get_context("fork")
+    with ctx.Pool(jobs,maxtasksperchild=2000) as pool:
+        results=pool.imap(_worker,files,chunksize=4)   # imap: az eredmenyek a bemenet sorrendjeben jonnek
+        for it in items:
+            if it[0]=="file":
+                sys.stdout.write(next(results))
+            else:
+                print("\n\n==================== %s ======================\n"%(it[1]))
+                if it[0]=="error": print("Cannot open file:",repr(it[2]))
+    return len(files)
+
+
+if __name__ == "__main__":
+    import argparse
+    ap=argparse.ArgumentParser(description="file integrity checker (see FORMATS.md)")
+    ap.add_argument("-j","--jobs",type=int,default=1,help="number of parallel worker processes (default: 1)")
+    ap.add_argument("paths",nargs="+",help="files or directories to check")
+    args=ap.parse_args()
+    for p in args.paths:
+        if not os.path.isdir(p): testone(p)
+        elif args.jobs>1: testdir_parallel(p,args.jobs)
+        else: testdir(p)

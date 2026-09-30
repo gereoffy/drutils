@@ -12,6 +12,11 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 ## Általános működés
 
 - **Felismerés tartalom alapján** (magic bytes), nem a kiterjesztés alapján: `testfile()` → `detect_and_test()`.
+- **Futtatás:** `pypy testfiles.py [-j N] fájl_vagy_könyvtár...`. A könyvtárakat rekurzívan bejárja.
+  - `-j N`: N párhuzamos folyamattal vizsgál, szálak helyett folyamatokkal, mert a GIL miatt a szálak nem futnának
+    ténylegesen párhuzamosan. Nagy fájlszámnál érdemes a magok számára állítani.
+  - A kimenet párhuzamosan is pontosan ugyanaz, mint soros futásnál: fájlonként egyben, az eredeti sorrendben, a sorok
+    nem keverednek. A mintákon (8607 fájl) 8 folyamattal 4,6× gyorsabb.
 - **Eredmény** (`testfile()` visszatérési értéke: `(hibapont, típus)`):
   - `> 0` → **BAD** (sérült),
   - `0` → **OK**,
