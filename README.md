@@ -62,7 +62,7 @@ testmp3.py  - mp3 frame chain, CRC, ID3/Xing/LAME validator
 testswf.py  - swf (Flash: FWS/CWS/ZWS) decompression, tag chain & embedded image validator  
 testasf.py  - wmv/wma (ASF) object, packet & payload structure validator  
 testmkv.py  - mkv/webm (Matroska) EBML tree, block, H.264/HEVC NAL & cue index validator  
-testpdf.py  - old pdf parser & validator  (used as fallback when pdfparse3 is not available)
+testpdf.py  - old pdf parser & validator  (used as fallback when pdfparse3 is not available)  
 fileinfo.py - common code of the per-file metadata lines (XXX_INFO: dates, author, program, device)  
 parseole.py - standalone OLE2 reader (olefile replacement, strict & lenient mode, metadata), no dependencies  
 
