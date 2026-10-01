@@ -24,6 +24,7 @@ from testdxf import testdxf
 from testdwg import testdwg
 from testwmf import testwmf,testemf
 from testmp4 import testmp4,mp4_kind
+from testavi import testavi
 
 
 ###############################################################################################################################
@@ -36,7 +37,7 @@ ext_types={"jpg":("jpg",),"jpeg":("jpg",),"png":("png",),"gif":("gif",),"tif":("
   "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"emf":("emf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
   "docx":("docx",)+ooxml_ok,"docm":("docx",)+ooxml_ok,"xlsx":("xlsx",)+ooxml_ok,"xlsm":("xlsx",)+ooxml_ok,"pptx":("pptx",)+ooxml_ok,
   "odt":("odt",),"dxf":("dxf",),"dwg":("dwg",),"heic":("heic",),"heif":("heic",),"avif":("heic",),
-  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
+  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"avi":("avi",),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
   "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv")}
 
 def testfile(f,size,fnev):
@@ -82,6 +83,10 @@ def detect_and_test(f,size,fnev):
 #    if d[0:4]==b'{\\rt': return testrtf(d),"rtf"
 
     if d[0:4]==b'AC10' and d[4:6].isdigit(): return testdwg(d+f.read(),fname=fnev),"dwg"   # -1: nem tamogatott DWG verzio
+    if d[0:4]==b'RIFF' and d[8:12]==b'AVI ':
+        # memoriaba kepezve: a tobb GB-os filmeket sem kell beolvasni (a vizsgalat csak a chunk fejleceket es a kockak elejet nezi)
+        import mmap
+        with mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ) as m: return testavi(m,fname=fnev),"avi"
     kind=mp4_kind(d)   # ISO Base Media: mp4, mov, m4a, 3gp, heic...
     if kind: return testmp4(d+f.read(),fname=fnev),kind
     # DXF: binaris, vagy szoveges "0 / SECTION" kezdettel (elotte lehet 999-es megjegyzes)

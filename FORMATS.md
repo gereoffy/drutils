@@ -33,11 +33,11 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 - **Kivételkezelés:** minden ellenőrző elkapja a saját kivételeit (hibapont: 100), egy sérült fájl nem állítja le a
   futást, és nem okozhat segfaultot (nincs natív kód, kivéve a zlib-et).
 - **Metaadat-sorok (`XXX_INFO`)**, a visszaállított fájlok azonosításához (a fájlnév és a dátum elvész): a DWG, DXF,
-  ZIP-alapú, OLE, JPEG, TIFF, MP4/MOV/HEIC és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
+  ZIP-alapú, OLE, JPEG, TIFF, MP4/MOV/HEIC, AVI és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
 
   `XXX_INFO;fájlnév;verzió;típus;létrehozás;utolsó mentés;dátum forrása;utoljára mentette;szerző;cím;program;[eszköz;]OK|BAD|DUNNO`
 
-  (A DWG-nél kicsit eltér, lásd ott.) Az `eszköz` mező (fényképezőgép, telefon) csak a JPG/TIF/MP4 sorokban van.
+  (A DWG-nél kicsit eltér, lásd ott.) Az `eszköz` mező (fényképezőgép, telefon) csak a JPG/TIF/MP4/AVI sorokban van.
   A dátumok helyi időben, `YYYY-MM-DD HH:MM:SS` formában, az UTC-ben tárolt értékek átszámolva. Az üres mező azt
   jelenti, hogy a fájlban nincs (értelmes) adat. A mezőkből a `;` és a vezérlőkarakterek ki vannak szedve.
   CSV-be gyűjtés: `grep -a '^JPG_INFO;' kimenet.txt > jpg.csv`. A `-a` kell, mert a kimenet más soraiban lehet
@@ -64,6 +64,7 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 | DWG (R10 – 2018) | `testdwg.py` | verziócsaládonként a formátum saját ellenőrzőösszegei | CRC16, CRC32, Adler-32, Reed–Solomon |
 | WMF, EMF | `testwmf.py` | rekordok, paraméterek összhangja, EOF | placeable fejléc XOR-összeg |
 | MP4, MOV, M4A, 3GP, HEIC, AVIF (ISOBMFF) | `testmp4.py` | box-szerkezet, mintatáblák, **minden minta helye**, H.264/H.265 NAL- és AV1 OBU-keretezés | – |
+| AVI (RIFF, OpenDML) | `testavi.py` | chunk-szerkezet, **az index minden bejegyzése**, a videokockák eleje és nulla blokkjai | – |
 
 ---
 
@@ -401,6 +402,35 @@ ellenőrzőösszegeit.
     Szerző, cím, program, eszköz: QuickTime `udta` (`©ART`, `©nam`, `©swr`, `©mak`, `©mod`), iTunes `ilst` (`©too`) és a
     QuickTime `keys` metaadatok. Forrás: `meta`, `mvhd`, vagy vegyesen.
   - HEIC/HEIF kép: az `Exif` elem (az `iloc` alapján), ugyanúgy, mint a JPEG-nél. Forrás: `exif`.
+
+## AVI (`testavi.py`)
+
+**Felismerés:** `RIFF` … `AVI `. A kodekeket nem dekódolja (lassú lenne, és a nagy fájloknál értelmetlen), a szerkezetet
+és az indexet nézi. 1 GB AVI kb. 1 s.
+
+- **RIFF-szerkezet:** a chunkok és listák egymásba ágyazása, mérete, a páros bájthatár; ami kilóg a szülőjéből vagy a
+  fájlból → csonka. OpenDML (1 GB fölött): a további `RIFF AVIX` szegmensek is. A fájl vége utáni szemét (a klaszter
+  végéig kiírt rész) csak figyelmeztetés.
+- **Fejlécek:** `avih`, streamenként `strh`/`strf`.
+- **`movi` lista:** minden chunk azonosítója érvényes (`##dc`, `##db`, `##wb`, `##pc`, `##tx`, `ix##`, `JUNK`), a
+  streamszám létező streamre mutat.
+- **Index:** az `idx1` és az OpenDML index (`indx` → `ix##`) **minden bejegyzése** egy ugyanolyan azonosítójú és méretű
+  chunkra mutat (az `idx1` eltolását a `movi` listához vagy a fájl elejéhez viszonyítva is felismeri). Ez fogja meg a
+  kiesett vagy elcsúszott részeket.
+- **Videokockák, dekódolás nélkül:** a kocka eleje (MJPEG: `FFD8`, MPEG-4/H.264: `00 00 01`), és hogy nincs-e a kocka
+  belsejében 64 bájtos nullasor (kódolt videoadatban ilyen nem lehet; a kocka végi nulla kitöltés megengedett). Ez a
+  bájtkeresés gyors, és a képkockákba eső kinullázott szektorokat is megfogja. A hangadatban a nulla csend is lehet,
+  azt nem nézi.
+- Egyes Canon fényképezőgépek a hangcsomag után 2 bájttal felülírják a következő chunk azonosítóját (pl. `}}dc`): ha
+  az index ugyanide ugyanilyen méretű, ugyanolyan végű chunkot mutat, csak figyelmeztetés.
+- A mintákon (151 fájl, 1 GB): mind OK; szintetikus sérülésnél csonkolás 30/30, kinullázott 512 bájtos szektor 30/30,
+  4 KB-os blokk 28/30 (a maradék hangadatra esett). A képkockák bitflipjei dekódolás nélkül nem derülnek ki.
+- **`AVI_INFO` sor:** verzió helyén a videokodek (`MJPG`, `XVID`…).
+  - Létrehozás: az `IDIT` chunk (Canon: `Wed Feb 02 15:05:50 2011`), a Fujifilm `strd` chunkjában lévő EXIF
+    (DateTimeOriginal, utolsó mentés: DateTime), végül a `LIST INFO` `ICRD` mezője.
+  - Program: `ISFT`, cím: `INAM`, szerző: `IART`.
+  - Eszköz: a Fuji EXIF gyártó és típus, a HP `JUNK` chunkjában lévő típus, más kamerák `strd` chunkjában lévő
+    gyártónév.
 
 ---
 

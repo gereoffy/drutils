@@ -83,18 +83,19 @@ def iso_local(s):
 ###############################################################################################################################
 # EXIF / TIFF IFD (jpeg APP1, tif, heic Exif elem)
 
-def tiff_meta(b):
+def tiff_meta(b, ifd0=None, little=True):
     """
     TIFF szerkezetu adat (II/MM fejlec) IFD0 + Exif IFD tagjei. Serult adatnal amennyi kiolvashato.
+    ifd0: fejlec nelkuli IFD (pl. a Fuji AVI strd chunkja): az IFD0 helye b-ben, az eltolasok b elejehez kepest.
     visszaad: dict: created (DateTimeOriginal/Digitized), modified (DateTime), make, model, software, artist, title
     """
     out = {}
     try:
-        if b[:2] not in (b'II', b'MM'): return out
-        E = '<' if b[:2] == b'II' else '>'
+        if ifd0 is None and b[:2] not in (b'II', b'MM'): return out
+        E = ('<' if b[:2] == b'II' else '>') if ifd0 is None else ('<' if little else '>')
         def ifd(off):
             tags = {}
-            if off < 8 or off + 2 > len(b): return tags
+            if off < (8 if ifd0 is None else 0) or off + 2 > len(b): return tags
             n, = unpack_from(E + 'H', b, off)
             for i in range(min(n, 500)):
                 p = off + 2 + i * 12
@@ -109,7 +110,7 @@ def tiff_meta(b):
                 elif typ == 3: tags[tag] = unpack_from(E + 'H', b, q)[0]
                 else: tags[tag] = unpack_from(E + 'L', b, q)[0]
             return tags
-        t0 = ifd(unpack_from(E + 'L', b, 4)[0])
+        t0 = ifd(unpack_from(E + 'L', b, 4)[0] if ifd0 is None else ifd0)
         ex = ifd(t0[0x8769]) if isinstance(t0.get(0x8769), int) else {}
         def s(tags, tag):
             v = tags.get(tag)
