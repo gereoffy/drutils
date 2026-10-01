@@ -33,7 +33,7 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 - **Kivételkezelés:** minden ellenőrző elkapja a saját kivételeit (hibapont: 100), egy sérült fájl nem állítja le a
   futást, és nem okozhat segfaultot (nincs natív kód, kivéve a zlib-et).
 - **Metaadat-sorok (`XXX_INFO`)**, a visszaállított fájlok azonosításához (a fájlnév és a dátum elvész): a DWG, DXF,
-  ZIP-alapú, OLE, JPEG, TIFF, MP4/MOV/HEIC, AVI, WMV/WMA, MKV/WebM, MP3, SWF és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
+  ZIP-alapú (CDR X4+ is), CDR, OLE, JPEG, TIFF, WebP, MP4/MOV/HEIC, AVI, WMV/WMA, MKV/WebM, MP3, WAV, SWF és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
 
   `XXX_INFO;fájlnév;verzió;típus;létrehozás;utolsó mentés;dátum forrása;utoljára mentette;szerző;cím;program;[eszköz;]OK|BAD|DUNNO`
 
@@ -65,6 +65,9 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 | WMF, EMF | `testwmf.py` | rekordok, paraméterek összhangja, EOF | placeable fejléc XOR-összeg |
 | MP4, MOV, M4A, 3GP, HEIC, AVIF (ISOBMFF) | `testmp4.py` | box-szerkezet, mintatáblák, **minden minta helye**, H.264/H.265 NAL- és AV1 OBU-keretezés | – |
 | AVI (RIFF, OpenDML) | `testavi.py` | chunk-szerkezet, **az index minden bejegyzése**, a videokockák eleje és nulla blokkjai | – |
+| WebP | `testavi.py` | RIFF és chunk méretek, VP8X jelzők, VP8/VP8L fejléc, VP8L és alfa nulla blokkjai | – |
+| WAV (RIFF, RF64) | `testavi.py` | chunk méretek, fmt összhang, **félbeszakadt felvétel**, ADPCM blokkfejlécek, MP3 keretlánc | – |
+| CorelDRAW CDR (RIFF 3–X3, ZIP X4+) | `testavi.py`, `testzip.py` | chunk-szerkezet, **a tömörített rajzblokkok teljes zlib-kitömörítése**, indexelt chunkok | Adler-32 (cmpr), CRC32 (ZIP) |
 | MP3 | `testmp3.py` | ID3v2 tagek, **a keretlánc hézagmentessége**, keretenkénti CRC, Xing/VBRI keretszám | CRC-16 (keret), LAME hangadat CRC-16 |
 | SWF (FWS, CWS, ZWS) | `testswf.py` | méret, **teljes zlib/LZMA-kitömörítés**, tagek láncolata, beágyazott képek | Adler-32 (CWS) |
 | WMV, WMA (ASF) | `testasf.py` | objektumok, **minden adatcsomag és payload hossza**, küldési idők, index | – |
@@ -91,7 +94,8 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 - **Pontosan az elvárt számú MCU/blokk** dekódolódjon scanenként (a képméretből és a mintavételezésből számolva).
 - Érvénytelen Huffman-kód, koefficiens-index túlcsordulás, idő előtti adatvég → hiba.
 - Restart (RST) markerek sorrendje (D0…D7 ciklikusan), restart interval nélküli RST → hiba.
-- **512+ egymás utáni 0x00 bájt** a scan-adatban → hiba (kinullázott szektor).
+- **512+ egymás utáni 0x00 bájt** a scan-adatban → hiba (kinullázott szektor). Kivétel a progresszív JPEG csak DC-s scanje: egyszínű
+  területen ott minden blokk a csupa 0 bites „0 különbség” kódot kapja, így a nullasor érvényes.
 
 **Egyéb:** a DC-értékekből ASCII-art előnézet rajzolható (`ASCII_ART` konstans a fájl elején: `None`,
 `"truecolor"`, `"256"`, `"16x2"`, `"16"`), a DC-dekódolás szemrevételezéséhez.
@@ -435,6 +439,60 @@ ellenőrzőösszegeit.
   - Program: `ISFT`, cím: `INAM`, szerző: `IART`.
   - Eszköz: a Fuji EXIF gyártó és típus, a HP `JUNK` chunkjában lévő típus, más kamerák `strd` chunkjában lévő
     gyártónév.
+
+## WebP (`testavi.py`, a RIFF alapú AVI mellett)
+
+**Felismerés:** `RIFF` … `WEBP`. Dekódolás nélkül.
+
+- A RIFF és a chunkok mérete (a csonkolás mindig kiderül), a `VP8X` jelzőbitjei és a chunkok összhangja, a vászon és
+  a kép mérete, animációnál minden `ANMF` keret a vásznon belül és benne képadat.
+- `VP8` (veszteséges) képfejléc: kulcskocka, verzió, start kód, méret, az első partíció a chunkon belül. `VP8L`
+  (veszteségmentes) fejléc, és nincs benne 64 bájtos nullasor; tömörített alfa (`ALPH`) ugyanígy, nyers alfa: pontosan
+  szélesség × magasság bájt.
+- A veszteséges VP8 adatban az egyszínű területeken hosszú nullasor is lehet (a mintákon 631 bájtos is), ezért ott a
+  kinullázott szektor és a bitflip dekódolás nélkül nem derül ki (szintetikus teszt: csonkolás 30/30, kinullázott
+  szektor 1/30).
+- A mintákon (240 WebP) mind OK.
+- **`WEBP_INFO` sor:** mint a `JPG_INFO`: méret, az `EXIF` chunk (készítés, módosítás, eszköz, program) és az `XMP`
+  chunk adatai.
+
+## WAV (`testavi.py`, RIFF WAVE és RF64)
+
+**Felismerés:** `RIFF`/`RF64` … `WAVE` (a nagyon kicsi fájlokat is). Dekódolás nélkül; a `testfiles` a nagy
+felvételeket memóriába képezve (`mmap`) olvassa. A big-endian `RIFX` WAV-ot nem ismeri (DUNNO).
+
+- A RIFF és a chunkok mérete (csonkolás); RF64-nél (4 GB fölött) a `ds64` chunk 64 bites méretei. Ha a RIFF fejlécben
+  a méret rossz (sok író elszámolja), de a fájlmérettel minden chunk stimmel, csak figyelmeztetés.
+- A `fmt` adatai: csatornák, mintavétel, blokkméret; PCM/float/A-law/mu-law-nál a blokkméret és a bájtráta összhangja
+  (figyelmeztetés), `WAVE_FORMAT_EXTENSIBLE` is.
+- **Félbeszakadt felvétel:** a fejlécben 0 (vagy régi) a hangadat mérete, de utána még sok adat van (a diktafon vagy a
+  felvevő program nem zárta le a fájlt) → hiba, a valódi méret kiírásával.
+- IMA és MS ADPCM: minden blokk fejléce (lépésindex, prediktor); MP3-at tartalmazó WAV: a `testmp3` keretlánc-ellenőrzése.
+- A PCM adatban a nulla a csend is lehet, ezért a kinullázott szektor és a bitflip ott nem derül ki.
+- A mintákon (661 fájl, köztük a Python `wave` moduljának szándékosan hibás tesztfájljai): 655 OK, 3 BAD (a szándékosan
+  csonkák), 3 DUNNO (big-endian). Szintetikus teszt: csonkolás és félbeszakadt felvétel 18/18.
+- **`WAV_INFO` sor:** verzió helyén a formátum (pl. `PCM 24bit 48000Hz 2ch`). Létrehozás: a Broadcast WAV (`bext`)
+  felvételi dátuma és ideje, ha nincs, a LIST INFO `ICRD`; program: `ISFT` (Sound Forge, GoldWave…), eszköz: a `bext`
+  Originator mezője (pl. `Pro Tools`, `Zoom H4n`), előadó, cím: LIST INFO vagy ID3 chunk.
+
+## CorelDRAW CDR (`testavi.py` és `testzip.py`)
+
+**Felismerés:** a 3–X3 verziók (`RIFF` … `CDR3`…`CDRD`) RIFF fájlok, az X4-től ZIP (X6-tól `mimetype`
+`application/x-vnd.corel.zcf.draw.document+zip`, előtte `content/riffData.cdr`). A ZIP-ben a rajz maga
+(`content/root.dat` vagy `content/riffData.cdr`) megint RIFF, így ugyanaz az ellenőrző nézi.
+
+- **RIFF:** a chunk-szerkezet (a közös RIFF-kóddal); a 8-as verziótól a rajz tömörített `LIST cmpr` blokkokban van:
+  a négy méretmező, a két `CPng` + zlib folyam **teljes kitömörítése (Adler-32)**, és a kitömörített chunkok bejárása,
+  ahol a méretmező index a blokk mérettáblájába (mint a libcdr-ben). A `stlt` (stílusok) lista a 9-es verziótól nem
+  chunk-szerkezetű, ott csak a mérete számít.
+- **ZIP:** a `testzip` minden ellenőrzése (tagonkénti CRC, XML), és a belső RIFF a fenti módon.
+- A verzió a RIFF form betűjéből (`CDR9` = 9, `CDRB` = 11, `CDRG` = X6, `CDRP` = 2022; az `L` betű kimaradt), a ZIP-es
+  CDR-ek XMP-jében lévő termékneve alapján ellenőrizve.
+- A mintákon (318 fájl, CorelDRAW 5…2022): mind OK. Szintetikus sérülésnél: RIFF: csonkolás 15/15, kinullázott szektor
+  13/15, bitflip 12/15; ZIP: mindhárom 15/15.
+- **Metaadat:** a régi (RIFF) CDR-ben nincs dátum, a `CDR_INFO` sorban csak a verzió van. A ZIP-es CDR a `ZIP_INFO`
+  sorba kerül (típus: `cdr`): az X6+ XMP-jéből létrehozás, utolsó mentés, szerző (`dc:creator`), utoljára mentette
+  (`crl:LastAuthor`), program (`CorelDRAW 2022`); az X4–X5-ben dátum nincs, ott a zip-tagok dátuma.
 
 ## MP3 (`testmp3.py`)
 

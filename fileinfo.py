@@ -150,7 +150,9 @@ def xmp_meta(b):
         def get(name):
             m = re.search(r'%s\s*=\s*"([^"]*)"' % name, x) or re.search(r'<%s>\s*([^<]*?)\s*</%s>' % (name, name), x)
             if m: return m.group(1).strip()
-            m = re.search(r'<%s>.*?<rdf:li[^>]*>([^<]*)</rdf:li>' % name, x, re.S)   # dc:creator, dc:title: rdf:Seq/Alt
+            # dc:creator, dc:title: rdf:Seq/Alt listaelem - csak az elemen belul (az ures <rdf:Alt/> utan ne a kovetkezo elemet)
+            m = re.search(r'<%s>(.*?)</%s>' % (name, name), x, re.S)
+            m = m and re.search(r'<rdf:li[^>]*>([^<]*)</rdf:li>', m.group(1))
             return m.group(1).strip() if m else ""
         out['created'] = iso_local(get('xmp:CreateDate')) or iso_local(get('photoshop:DateCreated')) or iso_local(get('exif:DateTimeOriginal'))
         out['modified'] = iso_local(get('xmp:ModifyDate'))

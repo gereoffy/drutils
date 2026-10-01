@@ -25,18 +25,19 @@ indxrename.py - link PhotoRec-recovered files to their original filename and dir
 Detects damaged/truncated files, e.g. after data recovery, see FORMATS.md for details:
   - old msoffice documents (doc/xls/ppt and other OLE2 files, Thumbs.db listing)
   - new office documents   (docx/xlsx/pptx, odt/ods/odp, epub, spv and other ZIP-based files)
-  - image formats          (jpg, png/apng, gif, tif, psd/psb, wmf/emf)
+  - image formats          (jpg, png/apng, gif, tif, psd/psb, webp, wmf/emf)
   - CAD drawings           (dxf, dwg R10-2018)
+  - vector graphics        (CorelDRAW cdr: RIFF 3-X3 and ZIP X4+)
   - SPSS data files        (sav/zsav)
   - video/audio containers (mp4, mov, m4a, 3gp and heic/avif images - ISO Base Media File Format; avi; wmv/wma; mkv/webm)
-  - audio                  (mp3)
+  - audio                  (mp3, wav)
   - flash                  (swf)
   - pdf                    (supports new extended parser at https://github.com/gereoffy/pdfparse3)
 
 File types are detected by content, not by extension. All-zero files are reported as BAD,
 extension/content mismatches as warnings. See FORMATS.md for what exactly is checked per format.
 
-For dwg, dxf, zip-based, ole, jpeg, tif, mp4/mov/heic, avi, wmv/wma, mkv/webm, mp3, swf and sav files a metadata line is printed per file
+For dwg, dxf, cdr, zip-based, ole, jpeg, tif, webp, mp4/mov/heic, avi, wmv/wma, mkv/webm, mp3, wav, swf and sav files a metadata line is printed per file
 (XXX_INFO;filename;version;type;created;modified;...), to identify recovered files: grep -a '^JPG_INFO;' out.txt > jpg.csv
 
 Pure Python, no external dependencies (OLE2 files are read by an own reader, olefile is no longer needed).
@@ -50,13 +51,13 @@ testgif.py  - gif  parser & validator
 testtif.py  - tif  parser & validator  
 testpsd.py  - psd/psb parser & validator  
 testwmf.py  - wmf/emf parser & validator  
-testzip.py  - zip-based formats (office, odf, epub, spv...) validator  
+testzip.py  - zip-based formats (office, odf, epub, spv, cdr X4+...) validator  
 testole.py  - OLE2 (doc/xls/ppt...) validator, built on parseole  
 testsav.py  - SPSS sav/zsav parser & validator  
 testdxf.py  - dxf (ASCII & binary) parser & validator  
 testdwg.py  - dwg integrity checker (CRC/checksums/Reed-Solomon)  
 testmp4.py  - mp4/mov/heic (ISOBMFF) structure & sample table validator  
-testavi.py  - avi (RIFF, OpenDML) structure & index validator  
+testavi.py  - RIFF formats (avi, wav, webp, cdr) validator  
 testmp3.py  - mp3 frame chain, CRC, ID3/Xing/LAME validator  
 testswf.py  - swf (Flash: FWS/CWS/ZWS) decompression, tag chain & embedded image validator  
 testasf.py  - wmv/wma (ASF) object, packet & payload structure validator  

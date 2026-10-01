@@ -24,7 +24,7 @@ from testdxf import testdxf
 from testdwg import testdwg
 from testwmf import testwmf,testemf
 from testmp4 import testmp4,mp4_kind
-from testavi import testavi
+from testavi import testavi,testwebp,webp_kind,testwav,wav_kind,testcdr,cdr_kind
 from testmp3 import testmp3,frame_header
 from testswf import testswf,swf_kind
 from testasf import testasf,asf_kind
@@ -41,8 +41,8 @@ ext_types={"jpg":("jpg",),"jpeg":("jpg",),"png":("png",),"gif":("gif",),"tif":("
   "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"emf":("emf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
   "docx":("docx",)+ooxml_ok,"docm":("docx",)+ooxml_ok,"xlsx":("xlsx",)+ooxml_ok,"xlsm":("xlsx",)+ooxml_ok,"pptx":("pptx",)+ooxml_ok,
   "odt":("odt",),"dxf":("dxf",),"dwg":("dwg",),"heic":("heic",),"heif":("heic",),"avif":("heic",),
-  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"avi":("avi",),"mp3":("mp3",),"swf":("swf",),"wmv":("asf",),"wma":("asf",),"asf":("asf",),"mkv":("mkv","webm"),"mka":("mkv","webm"),"mk3d":("mkv",),"webm":("webm","mkv"),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
-  "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv")}
+  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"avi":("avi",),"webp":("webp",),"wav":("wav",),"cdr":("cdr",),"mp3":("mp3",),"swf":("swf",),"wmv":("asf",),"wma":("asf",),"asf":("asf",),"mkv":("mkv","webm"),"mka":("mkv","webm"),"mk3d":("mkv",),"webm":("webm","mkv"),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
+  "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv","cdr")}
 
 def testfile(f,size,fnev):
     res,ext=detect_and_test(f,size,fnev)
@@ -72,6 +72,9 @@ def detect_and_test(f,size,fnev):
     if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
     if d[0:8]==b'\x89PNG\r\n\x1a\n': return testpng(d+f.read()),"png"
     if d[0:3]==b'ID3' and d[3] in (2,3,4): return testmp3(d+f.read(),fname=fnev),"mp3"   # a csak ID3 tagbol allo csonka file is kicsi lehet
+    if wav_kind(d):   # a WAV is lehet nagyon kicsi; a nagy felveteleket memoriaba kepezve olvassuk
+        import mmap
+        with mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ) as m: return testwav(m,fname=fnev),"wav"
     if len(d)<256: return -1,"small"
     if d[0:4] in [b'MM\x00\x2A',b'II\x2A\x00']: return testtif(d+f.read(),fname=fnev),"tif"
 
@@ -88,6 +91,8 @@ def detect_and_test(f,size,fnev):
 #    if d[0:4]==b'{\\rt': return testrtf(d),"rtf"
 
     if d[0:4]==b'AC10' and d[4:6].isdigit(): return testdwg(d+f.read(),fname=fnev),"dwg"   # -1: nem tamogatott DWG verzio
+    if webp_kind(d): return testwebp(d+f.read(),fname=fnev),"webp"
+    if cdr_kind(d): return testcdr(d+f.read(),fname=fnev),"cdr"
     if d[0:4]==b'RIFF' and d[8:12]==b'AVI ':
         # memoriaba kepezve: a tobb GB-os filmeket sem kell beolvasni (a vizsgalat csak a chunk fejleceket es a kockak elejet nezi)
         import mmap

@@ -8,7 +8,7 @@ import zlib
 import zipfile
 import xml.parsers.expat
 
-from fileinfo import print_info, result
+from fileinfo import print_info, result, xmp_meta
 
 # OpenDocument / epub: a 'mimetype' tag tartalma alapjan
 mimetypes = {
@@ -18,6 +18,7 @@ mimetypes = {
     b'application/vnd.oasis.opendocument.graphics': "odg",
     b'application/vnd.oasis.opendocument.formula': "odf",
     b'application/epub+zip': "epub",
+    b'application/x-vnd.corel.zcf.draw.document+zip': "cdr",     # CorelDRAW X6+
 }
 
 # Office Open XML: jellemzo fo tag -> kiterjesztes
@@ -33,6 +34,8 @@ def detect(zf, names):
         for n, ext in ooxml:
             if n in names: return ext, True
         return "ooxml", True
+    if "content/riffData.cdr" in names or ("content/root.dat" in names and "content/dataFileList.dat" in names):
+        return "cdr", True                                            # CorelDRAW X4-X5 (nincs mimetype)
     if any(n.startswith("outputViewer000") for n in names): return "spv", True # contains the output generated from data analytics functions run within SPSS
     if "META-INF/MANIFEST.MF" in names: return ("apk" if "AndroidManifest.xml" in names else "jar"), False
     return "zip", False
@@ -188,6 +191,17 @@ def zip_info(zf, infos, names, ext):
                     elif tag == "creator" and not author: author = s
                     elif tag == "title" and not title: title = s
                     elif tag == "meta" and attrs.get("name") == "generator": app = attrs.get("content", "")
+        elif ext == "cdr":                                    # CorelDRAW: XMP (X6+: datumok, szerzo, program; X4-X5: csak cim)
+            m = [n for n in ("META-INF/metadata.xml", "metadata/metadata.xml") if n in names]
+            if m:
+                x = _read(zf, m[0]).decode('utf-8', 'replace')
+                xm = xmp_meta(x)
+                created, modified = xm.get('created'), xm.get('modified')
+                author, title = xm.get('artist', ""), xm.get('title', "")
+                g = lambda tag: (re.search(r'<%s>\s*([^<]*?)\s*</%s>' % (tag, tag), x) or [None, ""])[1]
+                saved = g("crl:LastAuthor")
+                app = g("cdr:ProductName") or ("CorelDRAW core %s" % g("CoreVersion") if g("CoreVersion") else "")
+                title = title or g("Title")
         elif ext in ("jar", "apk") and "META-INF/MANIFEST.MF" in names:
             m = re.search(rb'^Created-By:\s*(.*?)\r?$', _read(zf, "META-INF/MANIFEST.MF"), re.M)
             if m: app = m.group(1).decode('utf-8', 'replace')
@@ -329,6 +343,12 @@ def _testzip(data, debug):
         if bad:
             if bad > 10: print("ERROR! ... %d bad members total" % bad)
             errcnt += 10
+        if ext == "cdr":                                      # a rajz maga: a belso RIFF CDR, ugyanazzal az ellenorzovel
+            from testavi import parse_cdr
+            for n in ("content/riffData.cdr", "content/root.dat"):
+                if n in readok:
+                    if parse_cdr(zf.read(n), debug, {}, "CDR %s" % n): errcnt += 10
+                    break
         if ext == "spv":
             err = check_spv(zf, infos, readok, log)
             if err:

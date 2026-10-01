@@ -688,8 +688,9 @@ def _testjpeg(d,debug,embedded,meta):
             print("ERROR! only %d of %d MCUs decoded  (%s)"%(mcu_cnt,mcu_max,scaninfo))
             errs+=10
 
-        # nullaval feltoltott (kinullazott) teruletek a scan adatban:
-        r=data.find(bytes(512),hdrlen,q if q>=0 else len(data))
+        # nullaval feltoltott (kinullazott) teruletek a scan adatban. A csak DC-s (progressive) scanben egyszinu teruleten
+        # minden blokk a "0 kulonbseg" kodot kapja, ami a Huffman tablaban csupa 0 bit: ott a nullasor ervenyes
+        r=data.find(bytes(512),hdrlen,q if q>=0 else len(data)) if Se>0 else -1
         if r>=0:
             print("ERROR! 512+ x 0x00 bytes repeating at %d  (%s)"%(r,scaninfo))
             errs+=10
