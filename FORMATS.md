@@ -33,7 +33,7 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 - **Kivételkezelés:** minden ellenőrző elkapja a saját kivételeit (hibapont: 100), egy sérült fájl nem állítja le a
   futást, és nem okozhat segfaultot (nincs natív kód, kivéve a zlib-et).
 - **Metaadat-sorok (`XXX_INFO`)**, a visszaállított fájlok azonosításához (a fájlnév és a dátum elvész): a DWG, DXF,
-  ZIP-alapú, OLE, JPEG, TIFF, MP4/MOV/HEIC, AVI, MP3 és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
+  ZIP-alapú, OLE, JPEG, TIFF, MP4/MOV/HEIC, AVI, WMV/WMA, MKV/WebM, MP3, SWF és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
 
   `XXX_INFO;fájlnév;verzió;típus;létrehozás;utolsó mentés;dátum forrása;utoljára mentette;szerző;cím;program;[eszköz;]OK|BAD|DUNNO`
 
@@ -66,6 +66,9 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 | MP4, MOV, M4A, 3GP, HEIC, AVIF (ISOBMFF) | `testmp4.py` | box-szerkezet, mintatáblák, **minden minta helye**, H.264/H.265 NAL- és AV1 OBU-keretezés | – |
 | AVI (RIFF, OpenDML) | `testavi.py` | chunk-szerkezet, **az index minden bejegyzése**, a videokockák eleje és nulla blokkjai | – |
 | MP3 | `testmp3.py` | ID3v2 tagek, **a keretlánc hézagmentessége**, keretenkénti CRC, Xing/VBRI keretszám | CRC-16 (keret), LAME hangadat CRC-16 |
+| SWF (FWS, CWS, ZWS) | `testswf.py` | méret, **teljes zlib/LZMA-kitömörítés**, tagek láncolata, beágyazott képek | Adler-32 (CWS) |
+| WMV, WMA (ASF) | `testasf.py` | objektumok, **minden adatcsomag és payload hossza**, küldési idők, index | – |
+| MKV, WebM (Matroska) | `testmkv.py` | EBML elemfa, blokkok és lacing, **H.264/HEVC NAL keretezés**, Cues/SeekHead index | CRC-32 elemek (ha vannak) |
 
 ---
 
@@ -458,6 +461,68 @@ kb. 1 GB/s.
     Player által ismeretlen albumnál az album nevébe írt rippelési idő (`Ismeretlen album (2010.05.23. 15:50:07)`).
   - Előadó, cím: ID3v2, ha nincs, ID3v1 (egy kódoló kitöltetlen alapértelmezett tagjét – „The Title”, „The Author” –
     kihagyja). Program: `TSSE`/`TENC`, vagy a LAME verzió.
+
+## SWF (`testswf.py`)
+
+**Felismerés:** `FWS` (tömörítetlen), `CWS` (zlib), `ZWS` (LZMA), értelmes verzióval és fejléccel. A visszaállító
+programok sok véletlen, `ZWS`-sel kezdődő adatot találnak (tömörített vagy titkosított fájlok darabjait): ezeket az
+LZMA fejléc (paraméterbájt, szótárméret) alapján nem veszi SWF-nek, rájuk DUNNO jön.
+
+- A fejlécben lévő (kitömörített) méret: tömörítetlennél a fájl mérete, `CWS`-nél **a teljes zlib-kitömörítés
+  (Adler-32)**, `ZWS`-nél a teljes LZMA-kitömörítés.
+- A tagek (`RECORDHEADER`) láncolata az End tagig. Az End tag után legfeljebb 512 bájt lehet: a kinullázott vagy
+  hiányzó adat nulla bájtja maga is End tag, ezért ott a lánc „szabályosan” véget érne. A fejlécben lévő
+  **képkockaszám = a ShowFrame tagek száma** (a csonkolást és a kiesett részt is megfogja).
+- A beágyazott képek (DefineBitsJPEG2/3/4: JPEG, PNG, GIF) a `testjpeg`/`testpng`/`testgif`-fel, a zlib-es
+  (DefineBitsLossless) képek kitömörítése. A videó- és hangadatot nem dekódolja.
+- A mintákon (26 valódi SWF, Flash 6–11): 25 OK, 1 BAD (az 1,5 MB-os határtól a végéig kinullázva, 179 képkockából
+  27 van meg). Az `ffmpeg`-gel készült és saját tömörítésű (CWS/ZWS) fájlokon: csonkolás, kinullázott szektor és
+  bitflip a tömörített fájloknál mindig hiba, tömörítetlennél csak ha képbe vagy szerkezetbe esik.
+- **`SWF_INFO` sor:** verzió: pl. `SWF 6 zlib`. Létrehozás / utolsó mentés és program, szerző, cím: a Metadata tag
+  (XMP), illetve a Flex fordító ProductInfo tagjében lévő fordítási idő.
+
+## WMV, WMA – ASF (`testasf.py`)
+
+**Felismerés:** az ASF Header Object GUID-ja. Dekódolás nélkül; a `testfiles` a nagy fájlokat memóriába képezve
+(`mmap`) olvassa. 1 GB kb. 1 s.
+
+- **Objektumszerkezet:** a Header Object gyerekeinek mérete pontosan kitölti a headert, a File Properties szerinti
+  fájlméret (kisebb fájl → csonka, nagyobb → figyelmeztetés), a Data Object mérete = 50 + csomagszám × csomagméret.
+- **Minden adatcsomag:** error correction, length type és property flags, csomaghossz, padding, és **a payloadok
+  hossza pontosan kitölti a csomagot** (több payload és tömörített payload is). A küldési idők nem ugorhatnak vissza
+  (egy kinullázott csomagnál visszaugranak). A video payloadok belsejében nem lehet 64 bájtos nullasor (tömörített
+  videoadatban ilyen nincs; a hangban a csend lehet nulla; a csomag végi kitöltés megengedett).
+- **Index:** a Data utáni objektumok mérete, a Simple Index minden bejegyzése létező csomagra mutat.
+- Szintetikus sérülésnél csonkolás és 4 KB-os blokk 24/24, kinullázott szektor 20/24 (a kimaradtak hangadatba
+  estek), a bitflipek dekódolás nélkül nem derülnek ki.
+- **`ASF_INFO` sor:** verzió helyén a streamek (`video+audio`, `audio`), típus `wmv`/`wma`.
+  - Létrehozás: a File Properties dátuma (FILETIME, UTC; a mintákon pontosan egyezik a fájl dátumával), ha nincs,
+    a `WM/EncodingTime`.
+  - **Olympus diktafonok** (VN, WS, DS sorozat): az `OLYMPUS` leíróban lévő felvételi idő (kezdete → létrehozás,
+    vége → utolsó mentés, a diktafon órája szerint), és a típus az utolsó (eszköz) mezőben, pl. `OLYMPUS VN541PC`.
+  - Cím, szerző: Content Description, program: `WM/ToolName`, utolsó mező (ha nem diktafon): `WM/AlbumTitle (WM/Year)`.
+- A mintákon (58 fájl: 4 WMV, 54 WMA, ebből 51 Olympus diktafonos): mind OK, dátum 57-nél.
+
+## MKV, WebM – Matroska (`testmkv.py`)
+
+**Felismerés:** EBML fejléc `matroska` / `webm` DocType-pal. Dekódolás nélkül; a `testfiles` a nagy fájlokat
+memóriába képezve (`mmap`) olvassa.
+
+- **EBML elemfa:** érvényes azonosítók és méretek, minden elem a szülőjén belül; ismeretlen méretű Segment és Cluster
+  (élő felvétel) is. A Segment után maradt adat csak figyelmeztetés.
+- **Blokkok** (SimpleBlock, Block): létező sáv, a lacing (Xiph, EBML, fix) méretei a blokkon belül.
+- **Kodekek, dekódolás nélkül:** H.264/HEVC: a képkockák NAL keretezése és a tiltott `00 00 00/01/02` sorozatok (mint a
+  `testmp4`-ben; ez fogja meg a képkockákba eső kinullázott szektorokat), AAC: nincs 64 bájtos nullasor (a mintákon
+  9914 ép blokkban egyszer sem), AC3: a keretek szinkronszava (az AC3-ban a csend lehet nulla). A „header stripping”
+  tömörítésnél (az `mkvmerge` levágja a keretek elejéről a mindig azonos bájtokat, pl. `0B 77`) a levágott bájtokat
+  visszailleszti; más kódolásnál (zlib, titkosítás) a kodek-ellenőrzés kimarad.
+- **Index:** a `Cues` minden bejegyzése egy Cluster elejére, illetve azon belül egy blokkra mutat; a `SeekHead` minden
+  bejegyzése a megadott azonosítójú elemre.
+- **CRC-32 elemek** (ha a fájlban vannak): a szülő elem többi adatának CRC-je.
+- A mintákon (45 fájl, mkvmerge, H.264 + AAC/AC3): 44 OK, 1 BAD (egy nagyobb film levágott darabja, a blokkok közé
+  más adat került). Szintetikus sérülésnél: csonkolás és 4 KB-os blokk 25/25, kinullázott szektor 23/25.
+- **`MKV_INFO` sor:** verzió helyén a kodekek (`AVC+AAC+TEXT`), típus `mkv`/`webm`. Létrehozás: az `Info` `DateUTC`
+  mezője (a muxolás ideje, UTC), cím: `Title`, program: `WritingApp`, előadó: a `Tags` ARTIST mezője.
 
 ---
 

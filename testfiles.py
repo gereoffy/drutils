@@ -26,6 +26,9 @@ from testwmf import testwmf,testemf
 from testmp4 import testmp4,mp4_kind
 from testavi import testavi
 from testmp3 import testmp3,frame_header
+from testswf import testswf,swf_kind
+from testasf import testasf,asf_kind
+from testmkv import testmkv,mkv_kind
 
 
 ###############################################################################################################################
@@ -38,7 +41,7 @@ ext_types={"jpg":("jpg",),"jpeg":("jpg",),"png":("png",),"gif":("gif",),"tif":("
   "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"emf":("emf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
   "docx":("docx",)+ooxml_ok,"docm":("docx",)+ooxml_ok,"xlsx":("xlsx",)+ooxml_ok,"xlsm":("xlsx",)+ooxml_ok,"pptx":("pptx",)+ooxml_ok,
   "odt":("odt",),"dxf":("dxf",),"dwg":("dwg",),"heic":("heic",),"heif":("heic",),"avif":("heic",),
-  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"avi":("avi",),"mp3":("mp3",),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
+  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"avi":("avi",),"mp3":("mp3",),"swf":("swf",),"wmv":("asf",),"wma":("asf",),"asf":("asf",),"mkv":("mkv","webm"),"mka":("mkv","webm"),"mk3d":("mkv",),"webm":("webm","mkv"),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
   "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv")}
 
 def testfile(f,size,fnev):
@@ -89,6 +92,14 @@ def detect_and_test(f,size,fnev):
         # memoriaba kepezve: a tobb GB-os filmeket sem kell beolvasni (a vizsgalat csak a chunk fejleceket es a kockak elejet nezi)
         import mmap
         with mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ) as m: return testavi(m,fname=fnev),"avi"
+    if swf_kind(d): return testswf(d+f.read(),fname=fnev),"swf"
+    mk=mkv_kind(d)
+    if mk:
+        import mmap
+        with mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ) as m: return testmkv(m,fname=fnev),mk
+    if asf_kind(d):
+        import mmap
+        with mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ) as m: return testasf(m,fname=fnev),"asf"
     kind=mp4_kind(d)   # ISO Base Media: mp4, mov, m4a, 3gp, heic...
     if kind: return testmp4(d+f.read(),fname=fnev),kind
     # MP3 ID3 tag nelkul: ket egymast koveto ervenyes MPEG audio keret az elejen
