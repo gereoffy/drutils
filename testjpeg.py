@@ -488,6 +488,7 @@ def _testjpeg(d,debug,embedded,meta):
 
     huffman_ac_tables= [None, None, None, None]   # (raw_lut, ac_lut)
     huffman_dc_tables= [None, None, None, None]
+    zero_sym= {}   # (tabla osztaly, tabla) -> a csupa 0 bites kod szimboluma
     quant={}
     component= {}
     acmask= {}   # progressive: komponensenkent a blokkok nem-nulla AC koefficiens bitmaszkja
@@ -532,6 +533,8 @@ def _testjpeg(d,debug,embedded,meta):
             huffman_dc_tables[Th]= raw
         else:
             huffman_ac_tables[Th]= (raw, ac)
+        # a csupa 0 bites kod (kanonikus Huffman: a legrovidebb hosszusagu elso szimbolum) szimboluma
+        zero_sym[(Tc,Th)]= huffval[0] if total else None
 
       return offset
 
@@ -688,9 +691,11 @@ def _testjpeg(d,debug,embedded,meta):
             print("ERROR! only %d of %d MCUs decoded  (%s)"%(mcu_cnt,mcu_max,scaninfo))
             errs+=10
 
-        # nullaval feltoltott (kinullazott) teruletek a scan adatban. A csak DC-s (progressive) scanben egyszinu teruleten
-        # minden blokk a "0 kulonbseg" kodot kapja, ami a Huffman tablaban csupa 0 bit: ott a nullasor ervenyes
-        r=data.find(bytes(512),hdrlen,q if q>=0 else len(data)) if Se>0 else -1
+        # nullaval feltoltott (kinullazott) teruletek a scan adatban. Egyszinu teruleten a blokk "0 DC kulonbseg + blokk vege"
+        # kodbol all: ha a Huffman tablakban (minden komponensnel) ezek a csupa 0 bites kodok, a nullasor ervenyes (a csak
+        # DC-s progressive scanben, es az optimalizalt tablaju, pl. regi szurkearnyalatos kepeknel)
+        blank_zero=all(zero_sym.get((0,component[c]['Td']))==0 and (Se==0 or zero_sym.get((1,component[c]['Ta']))==0) for c in cids)
+        r=data.find(bytes(512),hdrlen,q if q>=0 else len(data)) if not blank_zero else -1
         if r>=0:
             print("ERROR! 512+ x 0x00 bytes repeating at %d  (%s)"%(r,scaninfo))
             errs+=10
@@ -770,15 +775,21 @@ def _testjpeg(d,debug,embedded,meta):
                 if data[p]!=0: break
                 p+=1
             if p>2+3: log("%d zero bytes skipped"%(p-2))
+            skipped=p-2
             data=data[p:]
 
             # check for extra jpeg thumbnail/preview:
             p=data[:32].find(b'\xff\xd8')
             if p>=0 and len(data)>p+8:
-                log("WARNING: %d bytes extra image !!!\n"%(len(data)))
-                e=testjpeg(data[p:],debug)
-                if e: print("ERROR! ^^^ in extra image at %d (%d bytes)"%(len(d)-len(data)+p,len(data)-p))
-                errcnt+=e
+                pos=len(d)-len(data)+p
+                if skipped>=16 and pos%512==0:
+                    # nulla kitoltes utan, szektorhataron kezdodo masik kep: egy masik file darabja (visszaallitasi maradek), nem e file resze
+                    print("WARNING! %d bytes of another file (JPEG) after the end of image, at %d"%(len(data)-p,pos))
+                else:
+                    log("WARNING: %d bytes extra image !!!\n"%(len(data)))
+                    e=testjpeg(data[p:],debug)
+                    if e: print("ERROR! ^^^ in extra image at %d (%d bytes)"%(pos,len(data)-p))
+                    errcnt+=e
             elif data.startswith(b'\x01\n\x0e\x00\x00\x00Image_UTC_Data'):
                 log("Skipping %d bytes Image_UTC_Data"%(len(data)))
             else:
@@ -812,8 +823,8 @@ def _testjpeg(d,debug,embedded,meta):
             elif marker in [0xffc0,0xffc1,0xffc2]: # start of frame
                 bits, height, width, components = unpack(">BHHB", data[4:4+6])
                 if not embedded and (bits!=8 or components not in [1,3,4] or width>8*height or height>5*width or width>2*8192 or height>2*8192 or width<16 or height<16):
+                    # szokatlan meret (pl. panorama): csak figyelmeztetes - ha a fejlec serult, a teljes dekodolas ugyis elbukik
                     print("WARNING! ",end = '')
-                    errcnt+=1
                     # ez jo: WARNING! dimensions: 1016 x 1002 x 4 / 8bit , ez is: WARNING! dimensions: 1252 x 1075 x 4 / 8bit
                     # ez is: WARNING! dimensions: 14032 x 9922 x 3 / 8bit
                     # WARNING! dimensions: 1970 x 8120 x 3 / 8bit

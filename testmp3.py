@@ -329,7 +329,8 @@ def parse_mp3(d, debug, meta):
             if fstart + mlen > n:
                 print("ERROR! MP3: LAME music length %d, file is shorter (truncated)" % mlen)
                 errcnt = 10
-            elif crc_arc(d[fstart + flen:fstart + mlen]) != mcrc:
+            # a regi LAME (pl. 3.92) a zenehosszba a file vegi ID3v1 tagot is beleszamolja, a CRC-t viszont csak a hangadatra
+            elif crc_arc(d[fstart + flen:min(fstart + mlen, aend)]) != mcrc:
                 print("ERROR! MP3: LAME music CRC mismatch (audio data damaged)")
                 errcnt = 10
             else:

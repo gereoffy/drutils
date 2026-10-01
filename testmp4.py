@@ -101,7 +101,14 @@ def nal_tail_ok(tail, codec):
     """
     t = tail.lstrip(b'\x00')
     if not t: return True
-    if t[0] != 1 or len(tail) - len(t) < 2 or len(t) > 4: return False
+    if t[0] != 1 or len(tail) - len(t) < 2: return False
+    # filler NAL (AVC 12, HEVC 38) barmilyen hosszan: a tartalma csupa 0xFF, a vegen a 0x80 zaro byte (pl. Samsung telefonok)
+    hl = 2 if codec == 'avc' else 3
+    ftype = (t[1] & 0x1F == 12) if codec == 'avc' else (len(t) >= 3 and (t[1] >> 1) & 0x3F == 38)
+    if ftype and len(t) > 4:
+        body = t[hl:].rstrip(b'\x00')
+        return not body.rstrip(b'\x80').strip(b'\xff')
+    if len(t) > 4: return False
     if codec == 'avc': return len(t) >= 2 and t[1] & 0x1F in (9, 10, 11, 12)
     return len(t) >= 3 and (t[1] >> 1) & 0x3F in (35, 36, 37, 38)
 

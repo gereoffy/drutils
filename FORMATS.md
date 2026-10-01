@@ -94,8 +94,13 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 - **Pontosan az elvárt számú MCU/blokk** dekódolódjon scanenként (a képméretből és a mintavételezésből számolva).
 - Érvénytelen Huffman-kód, koefficiens-index túlcsordulás, idő előtti adatvég → hiba.
 - Restart (RST) markerek sorrendje (D0…D7 ciklikusan), restart interval nélküli RST → hiba.
-- **512+ egymás utáni 0x00 bájt** a scan-adatban → hiba (kinullázott szektor). Kivétel a progresszív JPEG csak DC-s scanje: egyszínű
-  területen ott minden blokk a csupa 0 bites „0 különbség” kódot kapja, így a nullasor érvényes.
+- **512+ egymás utáni 0x00 bájt** a scan-adatban → hiba (kinullázott szektor). Kivétel, ha egyszínű területen a blokk csupa 0 bitből
+  állhat: a progresszív JPEG csak DC-s scanje, és ha a Huffman-táblákban (minden komponensnél) a csupa 0 bites kód a
+  „0 DC különbség” és a „blokk vége” (EOB) – ilyenek pl. a régi, optimalizált táblájú szürkeárnyalatos képek.
+- A szokatlan képméret (pl. 21260 × 10630-as panoráma) csak figyelmeztetés: ha a fejléc sérült, a teljes dekódolás úgyis
+  elbukik.
+- A kép vége után nullakitöltéssel, 512 bájtos határon kezdődő másik JPEG egy másik fájl darabja (visszaállítási
+  maradék): figyelmeztetés. A közvetlenül utána következő (MPF, előnézeti) kép sérülése továbbra is hiba.
 
 **Egyéb:** a DC-értékekből ASCII-art előnézet rajzolható (`ASCII_ART` konstans a fájl elején: `None`,
 `"truecolor"`, `"256"`, `"16x2"`, `"16"`), a DC-dekódolás szemrevételezéséhez.
@@ -397,7 +402,8 @@ ellenőrzőösszegeit.
 - **H.264 / H.265 videó (`avc1`/`avc3`/`hvc1`/`hev1`):** minden minta NAL-egységekre bontása (a hosszmezők pontosan
   kiadják a minta méretét), érvényes NAL-fejléc, és **a NAL-egységek belsejében nincs tiltott `00 00 00/01/02`
   bájtsorozat** (emulation prevention). Ez a kinullázott blokkokat a videóadat belsejében is megfogja. A NAL végi
-  nulla kitöltést és egyes kódolók által a szelet végére fűzött „end of sequence” NAL-t elfogadja.
+  nulla kitöltést és egyes kódolók által a szelet végére Annex B kezdőkóddal fűzött rövid NAL-t (AUD, end of sequence)
+  elfogadja, a kitöltő (filler) NAL-t bármilyen hosszan, ha csupa `FF` (Samsung telefonok).
 - **AV1 videó (`av01`):** minden minta OBU-kra bontása (fejléc: tiltott és fenntartott bit, érvényes típus; LEB128
   hossz, a hosszak pontosan kiadják a mintát; a sequence/frame header és a metadata OBU záró bitjei).
 - **HEIC / HEIF / AVIF képek:** az `iloc` elemek adata a fájlon belül van, az elsődleges elem (`pitm`) létezik, és a
@@ -509,7 +515,9 @@ kb. 1 GB/s.
 - **Keretenkénti CRC-16** (Layer III, ha a kódoló bekapcsolta; a régi fájloknál gyakori): a fejléc és az
   oldalinformáció. Ha minden keretben rossz, kódoló-hibának veszi (figyelmeztetés).
 - **Xing/Info, VBRI fejléc:** a keretszám; ha kevesebb keret van → csonka.
-- **LAME fejléc:** a teljes hangadat CRC-16-ja (a tag saját CRC-jével ellenőrizve, hogy tényleg LAME tag).
+- **LAME fejléc:** a teljes hangadat CRC-16-ja (a tag saját CRC-jével ellenőrizve, hogy tényleg LAME tag). A régi LAME
+  (pl. 3.92) a zenehosszba a fájl végi ID3v1 tagot is beleszámolja, a CRC-t viszont csak a hangadatra: a CRC a hangadat
+  végéig (a végi tagek nélkül) számolódik.
 - Csak ID3 tagból álló fájl (a visszaállítás csak a tag elejét találta meg) → BAD, de a cím és az előadó kiíródik.
 - A mintákon (522 fájl): 424 OK, 98 BAD (96 csak ID3 tag, 2 csonka). Szintetikus sérülésnél: csonkolás 100%, kinullázott
   szektor/blokk 95–100%, bitflip a CRC-s fájloknál 70%, CRC nélkül csak ha a keretfejlécbe esik.
