@@ -41,7 +41,9 @@ def parse_chunks(d, start, end, parent, where):
         size, = unpack_from('<L', d, p + 4)
         if not fourcc_re.match(cid):
             if not d[p:end].strip(b'\x00'): return None
-            return "bad chunk id %r at %d (in %s)" % (cid, p, where)
+            # a movi listaban a ##dc/##wb chunk serult azonositoja (pl. Canon firmware hiba): az index alapjan dontunk rola
+            if not (where == "movi" and cid[2:] in (b'dc', b'db', b'wb', b'pc', b'tx') and p + 8 + size <= end):
+                return "bad chunk id %r at %d (in %s)" % (cid, p, where)
         if p + 8 + size > end: return "chunk %s at %d: size %d, only %d bytes left in %s (truncated?)" % (cid.decode('latin1'), p, size, end - p - 8, where)
         if cid in (b'LIST', b'RIFF'):
             form = d[p + 8:p + 12]
@@ -96,11 +98,14 @@ def avi_info(d, segs, codec):
             elif c.id == b'JUNK' and body[:4] == b'IIII':          # HP: a tipus szovegesen
                 s = re.search(rb'[ -~]{4,}', body[4:64])
                 if s: model = s.group().decode('latin1').strip()
+            elif c.id == b'JUNK':                                  # a VirtualDub a nevet a kitoltesbe irja
+                s = re.match(rb'\x00*([ -~]{8,})', body)
+                if s and re.search(rb'[A-Za-z]{3}', s.group(1)): info.setdefault(b'JUNKSW', s.group(1).decode('latin1').strip())
             elif c.id[:1] == b'I':
                 info.setdefault(c.id, body.split(b'\x00')[0].decode('latin1', 'replace').strip())
     if not created and info.get(b'ICRD'): created, src_c = _avi_date(info[b'ICRD'].encode('latin1')), "info"
     return (created, modified, date_source(created, modified, src_c, src_m), info.get(b'IART', ""), info.get(b'INAM', ""),
-            info.get(b'ISFT', ""), device(make, model))
+            info.get(b'ISFT', "") or info.get(b'JUNKSW', ""), device(make, model))
 
 
 def check_index(d, entries, chunks, label):
