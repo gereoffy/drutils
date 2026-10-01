@@ -25,6 +25,7 @@ from testdwg import testdwg
 from testwmf import testwmf,testemf
 from testmp4 import testmp4,mp4_kind
 from testavi import testavi
+from testmp3 import testmp3,frame_header
 
 
 ###############################################################################################################################
@@ -37,7 +38,7 @@ ext_types={"jpg":("jpg",),"jpeg":("jpg",),"png":("png",),"gif":("gif",),"tif":("
   "pdf":("pdf",),"sav":("sav",),"zsav":("sav",),"wmf":("wmf",),"emf":("emf",),"doc":("doc",),"dot":("doc",),"xls":("xls",),"xlt":("xls",),"ppt":("ppt",),"pps":("ppt",),
   "docx":("docx",)+ooxml_ok,"docm":("docx",)+ooxml_ok,"xlsx":("xlsx",)+ooxml_ok,"xlsm":("xlsx",)+ooxml_ok,"pptx":("pptx",)+ooxml_ok,
   "odt":("odt",),"dxf":("dxf",),"dwg":("dwg",),"heic":("heic",),"heif":("heic",),"avif":("heic",),
-  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"avi":("avi",),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
+  "mp4":("mp4","mov"),"m4v":("mp4","mov"),"m4a":("mp4","mov"),"m4b":("mp4","mov"),"3gp":("mp4","mov"),"3g2":("mp4","mov"),"mov":("mov","mp4"),"avi":("avi",),"mp3":("mp3",),"qt":("mov","mp4"),"ods":("ods",),"odp":("odp",),"spv":("spv",),"epub":("epub",),"jar":("jar",),
   "zip":("zip","jar","apk","docx","xlsx","pptx","vsdx","ooxml","odt","ods","odp","odg","epub","spv")}
 
 def testfile(f,size,fnev):
@@ -67,6 +68,7 @@ def detect_and_test(f,size,fnev):
     # a GIF es a PNG is lehet nagyon kicsi (ikonok, 1 pixeles kepek)
     if d[0:6] in [b'GIF87a', b'GIF89a']: f.seek(0); return testgif(f),"gif"
     if d[0:8]==b'\x89PNG\r\n\x1a\n': return testpng(d+f.read()),"png"
+    if d[0:3]==b'ID3' and d[3] in (2,3,4): return testmp3(d+f.read(),fname=fnev),"mp3"   # a csak ID3 tagbol allo csonka file is kicsi lehet
     if len(d)<256: return -1,"small"
     if d[0:4] in [b'MM\x00\x2A',b'II\x2A\x00']: return testtif(d+f.read(),fname=fnev),"tif"
 
@@ -89,6 +91,9 @@ def detect_and_test(f,size,fnev):
         with mmap.mmap(f.fileno(),0,access=mmap.ACCESS_READ) as m: return testavi(m,fname=fnev),"avi"
     kind=mp4_kind(d)   # ISO Base Media: mp4, mov, m4a, 3gp, heic...
     if kind: return testmp4(d+f.read(),fname=fnev),kind
+    # MP3 ID3 tag nelkul: ket egymast koveto ervenyes MPEG audio keret az elejen
+    h=frame_header(d,0) if d[0]==0xFF else None
+    if h and h[3]+4<=len(d) and frame_header(d,h[3]): return testmp3(d+f.read(),fname=fnev),"mp3"
     # DXF: binaris, vagy szoveges "0 / SECTION" kezdettel (elotte lehet 999-es megjegyzes)
     if d.startswith(b'AutoCAD Binary DXF\r\n\x1a\x00') or re.match(rb'[ \t]*(999[ \t]*\r?\n[^\n]*\n[ \t]*)?0[ \t]*\r?\nSECTION', d): return testdxf(d+f.read(),fname=fnev),"dxf"
 

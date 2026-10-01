@@ -33,7 +33,7 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 - **Kivételkezelés:** minden ellenőrző elkapja a saját kivételeit (hibapont: 100), egy sérült fájl nem állítja le a
   futást, és nem okozhat segfaultot (nincs natív kód, kivéve a zlib-et).
 - **Metaadat-sorok (`XXX_INFO`)**, a visszaállított fájlok azonosításához (a fájlnév és a dátum elvész): a DWG, DXF,
-  ZIP-alapú, OLE, JPEG, TIFF, MP4/MOV/HEIC, AVI és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
+  ZIP-alapú, OLE, JPEG, TIFF, MP4/MOV/HEIC, AVI, MP3 és SAV fájlokról minden fájlra kiír egy sort, a debug módtól függetlenül:
 
   `XXX_INFO;fájlnév;verzió;típus;létrehozás;utolsó mentés;dátum forrása;utoljára mentette;szerző;cím;program;[eszköz;]OK|BAD|DUNNO`
 
@@ -65,6 +65,7 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
 | WMF, EMF | `testwmf.py` | rekordok, paraméterek összhangja, EOF | placeable fejléc XOR-összeg |
 | MP4, MOV, M4A, 3GP, HEIC, AVIF (ISOBMFF) | `testmp4.py` | box-szerkezet, mintatáblák, **minden minta helye**, H.264/H.265 NAL- és AV1 OBU-keretezés | – |
 | AVI (RIFF, OpenDML) | `testavi.py` | chunk-szerkezet, **az index minden bejegyzése**, a videokockák eleje és nulla blokkjai | – |
+| MP3 | `testmp3.py` | ID3v2 tagek, **a keretlánc hézagmentessége**, keretenkénti CRC, Xing/VBRI keretszám | CRC-16 (keret), LAME hangadat CRC-16 |
 
 ---
 
@@ -431,6 +432,32 @@ ellenőrzőösszegeit.
   - Program: `ISFT`, cím: `INAM`, szerző: `IART`.
   - Eszköz: a Fuji EXIF gyártó és típus, a HP `JUNK` chunkjában lévő típus, más kamerák `strd` chunkjában lévő
     gyártónév.
+
+## MP3 (`testmp3.py`)
+
+**Felismerés:** `ID3` tag a fájl elején, vagy két egymást követő érvényes MPEG audio keret. Dekódolás nélkül, a mintákon
+kb. 1 GB/s.
+
+- **ID3v2 tag(ek)** a fájl elején (2.2, 2.3, 2.4; több egymás után is, egyes tagszerkesztők a régi elé írnak újat): a
+  fejléc, a tag mérete a fájlon belül, a frame-ek a tagon belül (v2.4-ben a hibás, nem syncsafe méretet író programokat
+  is kezeli), unsynchronisation. A beágyazott borítókép (APIC) a `testjpeg`/`testpng`-vel.
+- **A fájl végi tagek** (ID3v1, Lyrics3v2, APE) leválasztása.
+- **Keretlánc:** a fejlécből (verzió, layer, bitráta, mintavétel, padding) számolt hossz alapján a keretek hézag
+  nélkül követik egymást. Szinkronvesztésnél újraszinkronizál, és jelzi a hézagot (helye, mérete, nulla-e). Csonka
+  utolsó keret → hiba; a fájl vége utáni kevés (< 4 KB) szemét csak figyelmeztetés.
+- **Keretenkénti CRC-16** (Layer III, ha a kódoló bekapcsolta; a régi fájloknál gyakori): a fejléc és az
+  oldalinformáció. Ha minden keretben rossz, kódoló-hibának veszi (figyelmeztetés).
+- **Xing/Info, VBRI fejléc:** a keretszám; ha kevesebb keret van → csonka.
+- **LAME fejléc:** a teljes hangadat CRC-16-ja (a tag saját CRC-jével ellenőrizve, hogy tényleg LAME tag).
+- Csak ID3 tagból álló fájl (a visszaállítás csak a tag elejét találta meg) → BAD, de a cím és az előadó kiíródik.
+- A mintákon (522 fájl): 424 OK, 98 BAD (96 csak ID3 tag, 2 csonka). Szintetikus sérülésnél: csonkolás 100%, kinullázott
+  szektor/blokk 95–100%, bitflip a CRC-s fájloknál 70%, CRC nélkül csak ha a keretfejlécbe esik.
+- **`MP3_INFO` sor:** verzió: pl. `MPEG1 LIII`.
+  - A felvétel éve nem a fájl dátuma, ezért nem a dátum mezőkbe kerül, hanem az utolsó (eszköz) mezőbe: `album (év)`.
+  - Létrehozás / utolsó mentés: az ID3v2.4 kódolási (`TDEN`) és tagelési (`TDTG`) ideje, illetve a Windows Media
+    Player által ismeretlen albumnál az album nevébe írt rippelési idő (`Ismeretlen album (2010.05.23. 15:50:07)`).
+  - Előadó, cím: ID3v2, ha nincs, ID3v1 (egy kódoló kitöltetlen alapértelmezett tagjét – „The Title”, „The Author” –
+    kihagyja). Program: `TSSE`/`TENC`, vagy a LAME verzió.
 
 ---
 

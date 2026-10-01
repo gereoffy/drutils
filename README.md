@@ -29,6 +29,7 @@ Detects damaged/truncated files, e.g. after data recovery, see FORMATS.md for de
   - CAD drawings           (dxf, dwg R10-2018)
   - SPSS data files        (sav/zsav)
   - video/audio containers (mp4, mov, m4a, 3gp and heic/avif images - ISO Base Media File Format)
+  - audio                  (mp3)
   - pdf                    (supports new extended parser at https://github.com/gereoffy/pdfparse3)
 
 File types are detected by content, not by extension. All-zero files are reported as BAD,
@@ -54,6 +55,8 @@ testsav.py  - SPSS sav/zsav parser & validator
 testdxf.py  - dxf (ASCII & binary) parser & validator  
 testdwg.py  - dwg integrity checker (CRC/checksums/Reed-Solomon)  
 testmp4.py  - mp4/mov/heic (ISOBMFF) structure & sample table validator  
+testavi.py  - avi (RIFF, OpenDML) structure & index validator  
+testmp3.py  - mp3 frame chain, CRC, ID3/Xing/LAME validator  
 testpdf.py  - old pdf parser & validator  (used as fallback when pdfparse3 is not available)
 fileinfo.py - common code of the per-file metadata lines (XXX_INFO: dates, author, program, device)  
 parseole.py - standalone OLE2 reader (olefile replacement, strict & lenient mode, metadata), no dependencies  
