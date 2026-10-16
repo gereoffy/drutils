@@ -25,7 +25,7 @@ indxrename.py - link PhotoRec-recovered files to their original filename and dir
 Detects damaged/truncated files, e.g. after data recovery, see FORMATS.md for details:
   - old msoffice documents (doc/xls/ppt and other OLE2 files, Thumbs.db listing)
   - new office documents   (docx/xlsx/pptx, odt/ods/odp, epub, spv and other ZIP-based files)
-  - image formats          (jpg, png/apng, gif, tif, psd/psb, webp, wmf/emf)
+  - image formats          (jpg, png/apng, gif, tif, Canon cr2, psd/psb, webp, wmf/emf)
   - CAD drawings           (dxf, dwg R10-2018)
   - vector graphics        (CorelDRAW cdr: RIFF 3-X3 and ZIP X4+)
   - SPSS data files        (sav/zsav)
@@ -48,7 +48,7 @@ testfiles.py- runs the tests bellow in parallel based on the detected filetype
 testjpeg.py - jpeg parser & validator (full Huffman decoding, optional ASCII-art preview)  
 testpng.py  - png/apng parser & validator  
 testgif.py  - gif  parser & validator  
-testtif.py  - tif  parser & validator  
+testtif.py  - tif  parser & validator (also Canon CR2 raw)  
 testpsd.py  - psd/psb parser & validator  
 testwmf.py  - wmf/emf parser & validator  
 testzip.py  - zip-based formats (office, odf, epub, spv, cdr X4+...) validator  

@@ -159,6 +159,14 @@ Nagy adatmennyiséghez PyPy ajánlott (tipikusan 5–10× gyorsabb).
   - **PackBits:** túlfutás, maradék adat,
   - **JPEG (compression=7):** strip-enként a `testjpeg` dekódolja, a JPEGTables tag tábláival kiegészítve.
 - Egyéb tömörítésnél (pl. CCITT G3/G4) csak a strip-ek helye ellenőrzött.
+- **Canon CR2 (nyers kép, TIFF-alapú):** a bélyegkép-IFD csak egy beágyazott JPEG-re mutat (`JPEGInterchangeFormat`,
+  2 tag): a `testjpeg` dekódolja. A 6-os (OJPEG) tömörítésű strip-ek: ha bennük teljes JPEG van (az előnézet), a
+  `testjpeg` teljesen dekódolja; ha veszteségmentes JPEG (SOF3, a nyers szenzoradat, méret-tagek nélküli IFD-ben):
+  markerek, Huffman-táblák, a scan-adatban csak `FF00` kitöltés és RST, a végén `FFD9`, és nincs 512 bájtos nullasor
+  (kivéve, ha a DC-tábla csupa 0 kódja a 0 különbség). A Canon DPP által a fájl végére írt „recept” (`CANON OPTIONAL
+  DATA`): a fejlécben lévő hossz és a záró blokk (a csonkolás így itt is kiderül). A mintákon (20 CR2) mind OK;
+  szintetikus sérülésnél csonkolás, kinullázott szektor (előnézet és nyers adat) és az előnézet bitflipjei 10/10, a nyers
+  adat bitflipjei dekódolás nélkül nem derülnek ki.
 - **`TIF_INFO` sor:** verzió helyén a méret (`szélesség x magasság`). Készítés: EXIF DateTimeOriginal (Digitized),
   módosítás: DateTime (306), szerző: Artist, cím: XPTitle / ImageDescription, program: Software, eszköz: Make + Model.
   Ha nincs EXIF dátum, az XMP (700-as tag) `xmp:CreateDate` / `xmp:ModifyDate`. Forrás: `exif`, `xmp`, vagy vegyesen.

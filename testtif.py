@@ -151,7 +151,55 @@ def jpeg_checker(tables):
     return jpeg_check
 
 
-checkers = {1: uncompressed_check, 5: lzw_check, 8: deflate_check, 32946: deflate_check, 32773: packbits_check}
+def ljpeg_check(s):
+    """
+    vesztesegmentes JPEG (SOF3, pl. a Canon CR2 nyers adata) dekodolas nelkul: markerek, Huffman tablak, SOF3, SOS, a scan
+    adatban csak FF00 kitoltes es RST marker lehet, a vegen FFD9; nullasor (kinullazott szektor), kiveve ha a DC tabla
+    csupa 0 bites kodja a 0 kulonbseg (egyszinu teruleten ott a nulla ervenyes). visszaad: hibauzenet vagy None
+    """
+    import re
+    zero_sym = {}
+    p = 2
+    sof = None
+    while True:
+        if p + 4 > len(s) or s[p] != 0xFF: return "bad marker at %d" % p
+        m = s[p + 1]
+        l = s[p + 2] << 8 | s[p + 3]
+        if m == 0xDA: break
+        if p + 2 + l > len(s): return "marker 0x%02X at %d exceeds the data" % (m, p)
+        if m == 0xC4:
+            q = p + 4
+            while q + 17 <= p + 2 + l:
+                n = sum(s[q + 1:q + 17])
+                zero_sym[s[q] & 15] = s[q + 17] if n else None
+                q += 17 + n
+        elif m == 0xC3: sof = s[p + 4:p + 2 + l]
+        p += 2 + l
+    if not sof: return "no SOF3 (lossless) header"
+    hdr = p + 2 + l
+    sos = s[p + 4:hdr]
+    tables = [sos[2 + 2 * i] >> 4 for i in range(sos[0])]
+    if s[-2:] != b'\xff\xd9': return "no EOI at the end of the data (truncated?)"
+    scan = s[hdr:len(s) - 2]
+    for mk in re.finditer(rb'\xff[^\x00\xd0-\xd7\xff]', scan):
+        return "marker 0x%02X inside the scan data at %d" % (mk.group()[1], hdr + mk.start())
+    if not all(zero_sym.get(t) == 0 for t in tables):
+        z = scan.find(bytes(512))
+        if z >= 0: return "512+ zero bytes at %d in the scan data" % (hdr + z)
+    return None
+
+
+def ojpeg_check(d, o, l, expected):
+    """ compression=6: a Canon CR2 es mas fenykepezogepek teljes JPEG-et (elonezet) vagy vesztesegmentes JPEG-et (nyers adat) tesznek ide """
+    s = d[o:o + l]
+    if s[:2] != b'\xff\xd8': return None          # valodi regi OJPEG (tablak kulon): nem dekodoljuk
+    if b'\xff\xc3' in s[:4096]: return ljpeg_check(s)
+    from testjpeg import testjpeg
+    e = testjpeg(s, embedded=True)
+    return "JPEG errors (%d)" % e if e else None
+
+
+checkers = {1: uncompressed_check, 6: ojpeg_check, 5: lzw_check, 8: deflate_check, 32946: deflate_check, 32773: packbits_check}
 
 
 ###############################################################################################################################
@@ -206,7 +254,7 @@ def parse_tif(data, debug):
           print("ERROR! IFD #%d: bad IFD pointer %d (file size %d)" % (ifdno, ifd, len(data)))
           return errcnt + 10
       num = getint(ifd, 2)
-      if num < 4 or ifd + 2 + 12 * num + 4 > len(data):  # typical range: 12..19
+      if num < 1 or ifd + 2 + 12 * num + 4 > len(data):  # a CR2 bélyegkép IFD-je csak 2 tagból áll
           print("ERROR! IFD #%d: bad number of tags: %d" % (ifdno, num))
           return errcnt + 10
       log("---- IFD #%d at %d: %d tags" % (ifdno, ifd, num))
@@ -241,6 +289,14 @@ def parse_tif(data, debug):
       errcnt += check_image_data(data, tagvalues, ifdno, log)
       ifd = getint(ifd + 2 + 12 * num, 4)
       log("Next IFD:", ifd)
+    # Canon Digital Photo Professional "recept" a file vegen (CR2): fejlec (28 byte, benne a hossz) + adat + 64 byte-os zaro blokk
+    p = data.find(b'CANON OPTIONAL DATA\x00')
+    if p >= 0:
+        end = p + 28 + int.from_bytes(data[p + 24:p + 28], 'big') + 64
+        if end > len(data) or data[end - 64:end - 45] != b'CANON OPTIONAL DATA':
+            print("ERROR! Canon DPP recipe data at %d: %s" % (p, "truncated" if end > len(data) else "bad end block"))
+            errcnt += 10
+        else: log("TIFF: Canon DPP recipe data, %d bytes" % (end - p))
     return errcnt
 
 
@@ -260,6 +316,19 @@ def check_image_data(data, t, ifdno, log):
     if not isinstance(bits, list) or not bits: bits = [1]
     if len(bits) < spp: bits = bits + [bits[-1]] * (spp - len(bits))  # nehany iro csak 1 erteket ad meg
     compname = tiffcompress.get(comp, str(comp))
+
+    if 513 in t and 273 not in t and 324 not in t:   # csak beagyazott JPEG (pl. a CR2 belyegkepe): JPEGInterchangeFormat/Length
+        o, l = first(513, 0), first(514, 0)
+        if o + l > len(data) or l < 4:
+            print("ERROR! IFD #%d: embedded JPEG %d+%d outside of file" % (ifdno, o, l))
+            return 10
+        from testjpeg import testjpeg
+        e = testjpeg(data[o:o + l], embedded=True)
+        log("TIFF: embedded JPEG %d bytes%s" % (l, " BAD" if e else ""))
+        if e:
+            print("ERROR! IFD #%d: embedded JPEG (%d bytes) bad" % (ifdno, l))
+            return 10
+        return 0
 
     if 324 in t:   # tiled
         offsets, counts = t.get(324), t.get(325)
@@ -299,6 +368,15 @@ def check_image_data(data, t, ifdno, log):
     planes = spp if planar == 2 else 1
     needed = per_plane * planes
     log("TIFF %s %dx%d spp=%d bits=%s planar=%d photometric=%d  %d %ss (%d needed)" % (compname, W, H, spp, bits, planar, photometric, len(offsets), kind, needed))
+    if (W == 0 or H == 0) and comp == 6 and len(offsets) == 1:
+        # a CR2 nyers adat IFD-jeben nincs meret (a vesztesegmentes JPEG fejleceben van): a strip ellenorzese eleg
+        o, l = offsets[0], counts[0]
+        err = "data outside of file: %d+%d > %d" % (o, l, len(data)) if o + l > len(data) else ojpeg_check(data, o, l, 0)
+        log("TIFF: raw data (lossless JPEG) %d bytes%s" % (l, ": " + err if err else " OK"))
+        if err:
+            print("ERROR! IFD #%d: raw data: %s" % (ifdno, err))
+            return 10
+        return 0
     if W == 0 or H == 0:
         print("ERROR! IFD #%d: bad image size %d x %d" % (ifdno, W, H))
         return 10
@@ -334,6 +412,8 @@ def check_image_data(data, t, ifdno, log):
 
 
 if __name__ == "__main__":
+  import sys
+  sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows (cp1250 konzol): a fajlnevek miatt ne alljon le
   path = sys.argv[1] if len(sys.argv) > 1 else "tif/"
   if os.path.isdir(path):
     files = [os.path.join(path, n) for n in sorted(os.listdir(path))]
