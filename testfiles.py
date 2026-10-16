@@ -1,7 +1,10 @@
 #! /usr/bin/python3
 
 import sys
-sys.stdout.reconfigure(line_buffering=True)
+# a kimenet mindig UTF-8 (Windowson a konzol / atiranyitott file kodolasa pl. cp1250, abban nem minden fajlnev karakter
+# irhato ki, es a print kivetele leallitana a futast); ami megsem kodolhato, azt helyettesito karakter jelzi
+sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 import os
 import re

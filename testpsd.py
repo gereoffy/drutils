@@ -273,6 +273,8 @@ def testpsd(data, debug=False):
 
 
 if __name__ == "__main__":
+  import sys
+  sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows (cp1250 konzol): a fajlnevek miatt ne alljon le
   import os,sys
   args=sys.argv[1:]
   path=args[0] if args else "psd/"

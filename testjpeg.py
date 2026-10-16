@@ -903,6 +903,8 @@ def _testjpeg(d,debug,embedded,meta):
 #f=open("/home/spamwall/backup/ext/jpg/fec98baf1e9f4697_17229344__BCR-114C-38.jpg","rb")
 
 if __name__ == "__main__":
+  import sys
+  sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows (cp1250 konzol): a fajlnevek miatt ne alljon le
   args=sys.argv[1:]
   path=args[0] if args else "data/"
   if os.path.isdir(path):

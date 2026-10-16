@@ -260,6 +260,8 @@ def parse_asf(d, debug, meta):
 
 
 if __name__ == "__main__":
+  import sys
+  sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows (cp1250 konzol): a fajlnevek miatt ne alljon le
   import os, sys
   path = sys.argv[1] if len(sys.argv) > 1 else "_WMV/"
   if os.path.isdir(path):

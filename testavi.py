@@ -713,6 +713,8 @@ def parse_cdr(d, debug, meta, label="CDR"):
     return 0
 
 if __name__ == "__main__":
+  import sys
+  sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows (cp1250 konzol): a fajlnevek miatt ne alljon le
   import os, sys
   path = sys.argv[1] if len(sys.argv) > 1 else "_AVI/"
   if os.path.isdir(path):

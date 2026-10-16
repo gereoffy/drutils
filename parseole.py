@@ -566,6 +566,8 @@ def thumbs_catalog(ole):
 
 
 if __name__ == "__main__":
+    import sys
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")   # Windows (cp1250 konzol): a fajlnevek miatt ne alljon le
     # a streamek listaja es a metaadatok (megengedo modban, serult filera is)
     import sys
     for n in sys.argv[1:]:
